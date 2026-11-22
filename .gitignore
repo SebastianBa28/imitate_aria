@@ -1,0 +1,39 @@
+# Python cache & compiled binaries
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Heavy Model Weights
+*.pt
+*.pth
+*.bin
+weights/
+
+# Project Aria Raw Data & Output Telemetry
+# anchored: a bare "data/" would also ignore the packages/data/ code folder
+packages/data/data/
+*.vrs
+output/
+*.npz
+debug/
+
+# Video Files
+videos/
+*.mp4
+*.avi
+*.mov
+
+# IDE & System Files
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# tracking artefacts
+checkpoints/
+*.pkl
+*.npy
+*.rrd
+
+CLAUDE.md 
