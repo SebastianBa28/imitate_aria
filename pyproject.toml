@@ -1,0 +1,51 @@
+[project]
+name = "imitate-aria"
+version = "0.1.0"
+description = "Record demonstrations with Meta Project Aria Gen2 glasses and post-process them into 3D object trajectories"
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    # recording + reading VRS (the client SDK provides the aria_gen2 / aria_doctor CLIs)
+    "projectaria-client-sdk>=2.6",
+    "projectaria-tools>=2.3,<2.5",
+    # general
+    "numpy",
+    "scipy",
+    "opencv-python",
+    "pillow",
+    # post-processing: Grounding DINO (transformers), SAM 2 (ultralytics), CoTracker3 (torch.hub)
+    "torch>=2.7",
+    "torchvision",
+    "transformers",
+    "ultralytics",
+    # FoundationStereo (cloned into third_party/ by scripts/setup.sh). Its model code imports
+    # einops, and its Utils.py imports the rest at module level (only used for its own demos).
+    # Do NOT add xformers / flash-attn from its environment.yml: unused, and they downgrade torch.
+    "omegaconf",
+    "timm",
+    "huggingface-hub",
+    "einops",
+    "imageio",
+    "joblib",
+    "pandas",
+    "trimesh",
+    "open3d",
+    # LeRobot dataset building + upload (packages/data/log.py)
+    "lerobot[dataset]>=0.7",
+]
+
+[tool.uv]
+package = false  # standalone scripts, not an installable package
+# lerobot pulls opencv-python-headless, which clashes with opencv-python (we need its GUI for --roi):
+# never install the headless build; opencv-python provides the same cv2 module.
+override-dependencies = ["opencv-python-headless; sys_platform == 'never'"]
+
+# CUDA 12.8 builds of torch / torchvision; everything else comes from PyPI
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]

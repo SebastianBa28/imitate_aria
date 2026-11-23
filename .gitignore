@@ -36,4 +36,11 @@ checkpoints/
 *.npy
 *.rrd
 
+# Python environment (uv) and third-party code fetched by scripts/setup.sh
+.venv/
+third_party/
+
+# local LeRobot datasets built by packages/data/log.py
+datasets/
+
 CLAUDE.md 
