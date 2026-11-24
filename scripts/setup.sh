@@ -37,8 +37,14 @@ fi
 if [ "$(git -C "$FS_DIR" rev-parse HEAD)" != "$FS_COMMIT" ]; then
     echo "==> checking out pinned FoundationStereo commit ${FS_COMMIT:0:8}"
     git -C "$FS_DIR" fetch --quiet origin
+    git -C "$FS_DIR" checkout --quiet -- .   # drop the patch below so the checkout can't conflict
     git -C "$FS_DIR" checkout --quiet "$FS_COMMIT"
 fi
+# Patch: torch.cuda.amp.autocast is deprecated (FutureWarning on every call) -> torch.amp.autocast("cuda", ...).
+# Same behaviour. Upstream master still uses the old call. Idempotent: patched lines no longer match.
+sed -i 's/^\(\s*\)autocast = torch\.cuda\.amp\.autocast$/\1autocast = lambda **kw: torch.amp.autocast("cuda", **kw)/' \
+    "$FS_DIR/core/foundation_stereo.py"
+sed -i 's/torch\.cuda\.amp\.autocast(/torch.amp.autocast("cuda", /g' "$FS_DIR/core/geometry.py" "$FS_DIR/core/submodule.py"
 
 # --- 4. FoundationStereo checkpoint (Google Drive) ---------------------------------------
 if [ ! -f "$FS_CKPT_DIR/model_best_bp2.pth" ] || [ ! -f "$FS_CKPT_DIR/cfg.yaml" ]; then

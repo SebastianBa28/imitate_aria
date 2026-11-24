@@ -30,10 +30,10 @@ uv run aria_gen2 auth pair
 ## Record
 
 ```bash
-uv run python packages/data/record_session.py --name demo23 --data-dir sample_data
+uv run python packages/data/record_session.py --name demo23 --data-dir raw_data
 ```
 
-Press ENTER to stop; the `.vrs` is downloaded into `sample_data/`.
+Press ENTER to stop; the `.vrs` is downloaded into `raw_data/` as `<name>_<mon><day>.vrs` (e.g. `demo23_nov24.vrs`; `_1`, `_2`, ... for repeats on the same day).
 
 **Objects are detected on the first frame only.** Before starting, put the cube on the table next
 to the tray and look down at both from 40–60 cm. Then start, hold still ~2 s, pick the cube, put it
@@ -42,13 +42,11 @@ in the tray, hold still ~1 s, stop.
 ## Post-process
 
 ```bash
-uv run python packages/data/post_process.py --vrs sample_data/demo23_<timestamp>.vrs
+uv run python packages/data/post_process.py --vrs raw_data/demo23_nov24.vrs
 ```
 
-Useful options: `--stop N` (only the first N RGB frames, quick test), `--roi` (draw the first-frame
-boxes yourself if Grounding DINO misses an object), `--prompt "..."` (repeat per object),
-`--seg-frame K` (detect and segment on output frame K instead of the first, e.g. if frame 0 is badly
-exposed; points are still tracked through the whole clip).
+Useful options: `--stop N` (only the first N RGB frames, quick test),
+`--start N` (start at RGB frame N; by default the script starts where the camera's exposure has settled and the glasses have a pose, and prints which frame it picked).
 It prints, per object, the share of points with depth, the median depth and the point jitter while
 still, and writes its files to `output/<recording>/` (change the base folder with `--out-dir`):
 
@@ -61,6 +59,8 @@ still, and writes its files to `output/<recording>/` (change the base folder wit
   (`--no-overlay` to skip). One colour per object; filled dot = visible with a 3D position, hollow =
   visible but no depth, small red dot = hidden. Hand skeletons from the glasses' hand tracking: left
   white, right yellow (also saved in the npz as `hand_landmarks_*` / `hand_uv`).
+- `<recording>_depth.mp4`: stereo depth from the front SLAM cameras (rectified left view, 768x768) in
+  turbo colours (red = near, blue = far) shaded by surface orientation so edges show, black = no depth (`--no-depth-video` to skip).
 - `<recording>_seg.jpg`: the first frame with the Grounding DINO boxes and SAM 2 masks drawn on.
   Check this first: points are only sampled inside these masks, so a bad mask means bad tracking.
 
@@ -76,7 +76,8 @@ uv run python packages/data/log.py --push              # every output/<recording
 
 Builds `datasets/imitate-aria` locally and uploads it to `SebastianBa28/imitate-aria` (private; add
 `--public` to change). Without `--push` it only builds locally; `--overwrite` rebuilds an existing local copy.
-All recordings must share the same `--stride` (fps), `--video-width` and prompts. Per frame it stores the RGB
-video, `observation.state` (right-hand keypoints + object centroids), `action` (right-hand keypoints at the
-next frame), both hands, the object points with validity flags, and the glasses pose, all in each
-recording's VIO world frame.
+All recordings must share the same `--stride` (fps), `--video-width` and prompts (`PROMPTS` in `post_process.py`). Per frame it stores the RGB
+video, `observation.state` (right-hand 5 fingertips), `observation.object_points`, `action` (fingertips at
+the next frame) and `*_valid` flags (missing values are 0, never filled), all in each recording's VIO world
+frame. Which object each point belongs to is in `meta/objects.json`. The overlay and depth videos are uploaded too, as
+`debug.overlay` and `debug.depth` (for viewing only, not policy inputs).

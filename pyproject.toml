@@ -36,7 +36,7 @@ dependencies = [
 
 [tool.uv]
 package = false  # standalone scripts, not an installable package
-# lerobot pulls opencv-python-headless, which clashes with opencv-python (we need its GUI for --roi):
+# lerobot pulls opencv-python-headless, which clashes with opencv-python:
 # never install the headless build; opencv-python provides the same cv2 module.
 override-dependencies = ["opencv-python-headless; sys_platform == 'never'"]
 

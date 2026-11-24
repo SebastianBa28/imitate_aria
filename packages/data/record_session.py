@@ -16,6 +16,7 @@ Usage:
     python record_session.py --name demo14 --data-dir ../../sample_data
 """
 import argparse
+import datetime
 import re
 import subprocess
 import sys
@@ -57,6 +58,19 @@ def get_uuid_for_name(name):
             if match:
                 return match.group(0)
     return None
+
+
+def short_name(vrs_path, name):
+    """<name>_<mon><day>.vrs (e.g. demo_nov23.vrs), then _1, _2, ... once that name exists.
+    The date comes from the downloaded file name (<name>_YYYYMMDD_HHMMSS.vrs), falling back to today."""
+    m = re.search(r"_(\d{8})_\d{6}$", vrs_path.stem)
+    date = datetime.datetime.strptime(m.group(1), "%Y%m%d") if m else datetime.date.today()
+    base = f"{name}_{date.strftime('%b').lower()}{date.day}"
+    target, i = vrs_path.with_name(f"{base}.vrs"), 0
+    while target.exists():
+        i += 1
+        target = vrs_path.with_name(f"{base}_{i}.vrs")
+    return target
 
 
 def main():
@@ -118,7 +132,7 @@ def main():
     if not new_vrs or new_vrs[-1].stat().st_size == 0:
         sys.exit(f"Error: Download finished, but no VRS matching '{args.name}*.vrs' was found in '{data_dir}/'.")
 
-    vrs_path = new_vrs[-1]
+    vrs_path = new_vrs[-1].rename(short_name(new_vrs[-1], args.name))
     print(f"\nRecording saved successfully to: {vrs_path}")
 
 

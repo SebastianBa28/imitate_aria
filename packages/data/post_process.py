@@ -3,10 +3,10 @@
 Post-process an Aria Gen2 .vrs recording.
 
 Official AINA recipe (arXiv 2511.16661):
-  1. Segment ONCE, on one frame only (the first, or --seg-frame): Grounding DINO box (or --roi) -> SAM 2 mask per object
-  2. Sample --n-points points inside each of those masks
-  3. CoTracker3 follows all points through the whole clip (forward and backward from the segmentation
-     frame), with per-point visibility
+  1. Segment ONCE, on the first sampled frame only: Grounding DINO box -> SAM 2 mask per object
+  2. Sample a fixed number of points inside each mask (N_POINTS, one count per prompt)
+  3. CoTracker3 (--tracker online by default, or offline) follows all points through the whole clip
+     (forward from the first frame), with per-point visibility
      (so you can see when an object is hidden in the hand). No re-detection, no re-segmentation.
   4. Stereo depth + lift to 3D: the two front SLAM cameras (slam-front-left / -right) are
      rectified to a virtual pinhole pair along their baseline, FoundationStereo gives the
@@ -20,18 +20,20 @@ Output, in --out-dir/<vrs stem>/ (default output/<vrs stem>/), raw and complete 
     per point (N):   points_world (T,N,3), depth (T,N), tracks (T,N,2) in frame pixels, vis (T,N), obj_id (N)
     hands:           hand_landmarks_device / hand_landmarks_world (T,2,21,3), hand_uv (T,2,21,2) in frame
                      pixels; axis 1 = (left, right); on-device hand tracking, NaN = hand not tracked
-    per object (K):  object_names, boxes0 (K,4), masks0 (K,H,W)   (on frame seg_frame, frame pixels)
-    metadata:        vrs_path, fps, start, stride, scale, seg_frame, frame_hw, n_points, video_file, overlay_file, seg_file, video_hw
+    per object (K):  object_names, boxes0 (K,4), masks0 (K,H,W)   (on frame 0, frame pixels)
+    metadata:        vrs_path, fps, start, stride, scale, tracker, frame_hw, n_points (per object),
+                     video_file, overlay_file, depth_video_file, depth_video_range_m, seg_file, video_hw
   <vrs stem>_rgb.mp4   the same T frames, downscaled to --video-width, at fps: video frame t = row t
   <vrs stem>_overlay.mp4   same frames with the tracked points drawn on, for checking (--no-overlay to skip):
                        colour per object; filled = visible with 3D, hollow = visible but no depth,
                        small red = hidden; hand skeletons: left white, right yellow
-  <vrs stem>_seg.jpg   segmentation frame (frame resolution) with the Grounding DINO boxes + SAM 2 masks drawn on
+  <vrs stem>_depth.mp4   FoundationStereo depth in the rectified left SLAM view (512x512), frame t = row t
+                       (--no-depth-video to skip): turbo colour map shaded by surface normals, red = near (DEPTH_VIS_RANGE[0]), blue = far
+                       (DEPTH_VIS_RANGE[1]), black = no depth / no SLAM pair
+  <vrs stem>_seg.jpg   frame 0 (frame resolution) with the Grounding DINO boxes + SAM 2 masks drawn on
 
-    python post_process.py --vrs ../../sample_data/demo20_20261116_175133.vrs --prompt "red cube" --prompt "cardboard box"
-    python post_process.py --vrs ... --roi            # draw the boxes yourself on the segmentation frame instead of Grounding DINO
+    python post_process.py --vrs ../../raw_data/rubiks1_20261123_231401.vrs
     python post_process.py --vrs ... --stop 60        # quick test on the first frames
-    python post_process.py --vrs ... --seg-frame 5    # segment on output frame 5 (e.g. frame 0 badly exposed)
 
 Setup: run `bash scripts/setup.sh` from the repo root once. It installs the Python environment
 with uv and puts FoundationStereo + its checkpoint in third_party/FoundationStereo, where this
@@ -43,6 +45,8 @@ one session_idx. "device" = glasses frame. T_a_b maps b-frame points into frame 
 is NaN, never zero.
 """
 import argparse
+import contextlib
+import functools
 import os
 import sys
 import warnings
@@ -54,8 +58,31 @@ from scipy.ndimage import map_coordinates
 
 FS_CKPT = os.path.join("pretrained_models", "23-51-11", "model_best_bp2.pth")
 FS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "third_party", "FoundationStereo")
+PROMPTS = ["rubiks cube", "laptop"]  # objects to track (Grounding DINO text prompts), in obj_id order
+N_POINTS = [250, 450]                # points sampled per object, same order as PROMPTS
 MAX_POSE_DT_NS = 50_000_000  # frames whose nearest valid VIO sample is further away get no pose
+STEREO_SIZE = 768             # rectified SLAM image side (px), at native focal length: ~115 deg FOV
+DEPTH_VIS_RANGE = (0.3, 0.8)  # m, mapped red..blue (turbo) in <stem>_depth.mp4 (farther clips to blue)
+SETTLE_WINDOW_S = 0.5          # auto start: brightness must stay steady this long...
+SETTLE_TOL = 0.02              # ...within this fraction of the frame's mean brightness
 LIFT_RADIUS = 7              # px window (2r+1)^2 around a tracked point to read its depth
+
+
+@contextlib.contextmanager
+def quiet_stderr():
+    """Silence C/C++ stderr (fd 2) inside the block: projectaria_tools/VRS log every stream activation and
+    H.265 decoder fallback there, with no log-level setting. Python exceptions still propagate normally."""
+    sys.stderr.flush()
+    saved = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 2)
+    try:
+        yield
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved, 2)
+        os.close(devnull)
+        os.close(saved)
 
 
 def as_matrix(T):
@@ -85,6 +112,20 @@ def read_vrs(dp, start, stop, stride, scale):
         ts.append(rec.capture_timestamp_ns)
     print(f"read {len(frames)} frames ({frames[0].shape[1]}x{frames[0].shape[0]}) from {n} total")
     return frames, np.array(ts, dtype=np.int64)
+
+
+def auto_start(frames, rgb_ts, T_wd, window_s=SETTLE_WINDOW_S, tol=SETTLE_TOL):
+    """First sampled frame where the RGB auto-exposure has settled (mean brightness stays within tol of
+    that frame's for the next window_s seconds) and the frame has a VIO pose. The glasses take ~1-3 s to
+    adjust exposure at the start of a recording, and frames without a pose get no 3D anyway.
+    Returns (index, settle index, pose index); settle/pose index is None if never reached."""
+    b = np.array([f[::16, ::16].mean() for f in frames])
+    fps = 1e9 / np.median(np.diff(rgb_ts)) if len(rgb_ts) > 1 else 10.0
+    w = max(2, int(round(window_s * fps)))
+    settle = next((i for i in range(len(b) - w + 1)
+                   if np.abs(b[i:i + w] - b[i]).max() <= tol * max(b[i], 1.0)), None)
+    pose = next((i for i in range(len(T_wd)) if np.isfinite(T_wd[i]).all()), None)
+    return max(settle or 0, pose or 0), settle, pose
 
 
 def read_synced(dp, rgb_ts):
@@ -169,10 +210,11 @@ def read_hands(dp, rgb_ts):
 
 
 # ----------------------------------------------------------------------------- step 1: segmentation-frame boxes
-def boxes_grounding_dino(rgb, prompts, device, model_id, box_thr, text_thr):
+def boxes_grounding_dino(rgb, prompts, device, box_thr):
     from PIL import Image
     from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
+    model_id = "IDEA-Research/grounding-dino-base"
     proc = AutoProcessor.from_pretrained(model_id)
     model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device).eval()
     img = Image.fromarray(rgb)
@@ -184,12 +226,12 @@ def boxes_grounding_dino(rgb, prompts, device, model_id, box_thr, text_thr):
             out = model(**inp)
         try:
             res = proc.post_process_grounded_object_detection(
-                out, inp.input_ids, threshold=box_thr, text_threshold=text_thr, target_sizes=[img.size[::-1]])[0]
+                out, inp.input_ids, threshold=box_thr, target_sizes=[img.size[::-1]])[0]
         except TypeError:  # older transformers
             res = proc.post_process_grounded_object_detection(
-                out, inp.input_ids, box_threshold=box_thr, text_threshold=text_thr, target_sizes=[img.size[::-1]])[0]
+                out, inp.input_ids, box_threshold=box_thr, target_sizes=[img.size[::-1]])[0]
         if len(res["boxes"]) == 0:
-            print(f"  Grounding DINO: nothing for '{p}' (lower --box-thr or use --roi)")
+            print(f"  Grounding DINO: nothing for '{p}' (lower --box-thr or pick another start frame with --start)")
             continue
         k = int(res["scores"].argmax())
         b = res["boxes"][k].cpu().numpy().tolist()
@@ -200,24 +242,13 @@ def boxes_grounding_dino(rgb, prompts, device, model_id, box_thr, text_thr):
     return boxes
 
 
-def boxes_manual(rgb, prompts):
-    boxes = []
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    for p in prompts:
-        x, y, w, h = cv2.selectROI(f"draw a box around: {p}  (ENTER to confirm)", bgr, showCrosshair=False)
-        cv2.destroyAllWindows()
-        if w > 0 and h > 0:
-            boxes.append((p, [x, y, x + w, y + h]))
-    return boxes
-
-
 # ----------------------------------------------------------------------------- step 2: segmentation-frame masks
-def masks_sam2(rgb, boxes, sam_model):
+def masks_sam2(rgb, boxes):
     """SAM 2 in image mode on one frame only: one (H,W) bool mask per box, same order."""
     from ultralytics import SAM
 
     h, w = rgb.shape[:2]
-    res = SAM(sam_model)(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), bboxes=[b for _, b in boxes], verbose=False)[0]
+    res = SAM("sam2.1_l.pt")(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), bboxes=[b for _, b in boxes], verbose=False)[0]
     if res.masks is None:
         return [np.zeros((h, w), bool) for _ in boxes]
     masks = []
@@ -231,9 +262,33 @@ def masks_sam2(rgb, boxes, sam_model):
 
 
 # ----------------------------------------------------------------------------- step 3: CoTracker3
-def track_points(frames, masks0, n_points, device, seg_frame=0, max_side=512):
-    """Sample up to n_points inside each mask (masks0 are on frames[seg_frame]) and track them all with
-    CoTracker3. The offline model tracks forward and backward from the query frame, so every frame gets a track.
+def _track_online(model, small, q_xy, device):
+    """Online CoTracker3 over small[0..], all points queried on frame 0: feeds overlapping windows of
+    2*step frames every step frames, as in CoTracker's online_demo.py. Returns tracks (T,N,2), vis (T,N)."""
+    T, step = len(small), model.step
+    frames = list(small) + [small[-1]] * max(0, 2 * step + 1 - len(small))  # pad very short segments
+    q = torch.cat([torch.zeros_like(q_xy[:, :1]), q_xy], 1)[None].to(device)  # (1,N,3), query frame 0
+
+    def run(chunk, first):
+        video = torch.from_numpy(np.stack(chunk)).permute(0, 3, 1, 2)[None].float().to(device)
+        return model(video, is_first_step=first, queries=q, add_support_grid=True)
+
+    first = True
+    for i in range(len(frames)):
+        if i % step == 0 and i != 0:
+            run(frames[max(0, i - 2 * step):i], first)
+            first = False
+    tracks, vis = run(frames[-(i % step) - step - 1:], first)
+    return tracks[0, :T].cpu().numpy(), vis[0, :T].cpu().numpy()
+
+
+def track_points(frames, masks0, n_points, device, max_side=512, tracker='online'):
+    """Sample points inside each mask (masks0 are on frames[0]) and track them all with CoTracker3 from frame 0.
+    Object k gets n_points[k] points, sampled from its mask downscaled to the tracking resolution.
+
+    tracker="online": CoTracker3 online, sliding 16-frame windows, so GPU memory does not grow with clip length.
+    tracker="offline": CoTracker3 offline, the whole clip in one call (more robust to occlusions, but memory
+    grows with clip length); its feature encoder runs 16 frames at a time (identical result, less memory).
 
     Returns tracks (T,N,2) in frame pixel coords, vis (T,N) bool, obj_id (N,) index into masks0.
     """
@@ -243,27 +298,38 @@ def track_points(frames, masks0, n_points, device, seg_frame=0, max_side=512):
     sh, sw = small[0].shape[:2]
     rng = np.random.default_rng(0)
     pts, obj_id = [], []
-    for k, m in enumerate(masks0):
+    for k, (m, n_k) in enumerate(zip(masks0, n_points)):
         ms = cv2.resize(m.astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST) > 0
         ys, xs = np.nonzero(ms)
         if len(xs) == 0:
             print(f"  object {k}: empty mask, no points")
             continue
-        sel = rng.choice(len(xs), size=min(n_points, len(xs)), replace=False)
-        pts += [[seg_frame, xs[i], ys[i]] for i in sel]  # (query frame, x, y)
+        sel = rng.choice(len(xs), size=min(int(n_k), len(xs)), replace=False)
+        print(f"  object {k}: {m.sum()} mask px -> {len(sel)} points")
+        pts += [[0, xs[i], ys[i]] for i in sel]  # (query frame, x, y)
         obj_id += [k] * len(sel)
     if not pts:
         raise SystemExit("all segmentation masks are empty; nothing to track")
-    q = torch.tensor(pts, dtype=torch.float32, device=device)[None]
-    video = torch.from_numpy(np.stack(small)).permute(0, 3, 1, 2)[None].float().to(device)
-    model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline").to(device)
-    with torch.no_grad():
-        tracks, vis = model(video, queries=q)
-    tracks = tracks[0].cpu().numpy() / s  # T,N,2 in frame coords
-    vis = vis[0].cpu().numpy().astype(bool)  # T,N
-    del model, video
+    q = torch.tensor(pts, dtype=torch.float32)
+    if tracker == "online":
+        model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_online").to(device)
+        with torch.no_grad():
+            tracks, vis = _track_online(model, small, q[:, 1:], device)
+    else:
+        video = torch.from_numpy(np.stack(small)).permute(0, 3, 1, 2)[None].float().to(device)
+        model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline").to(device)
+        # its feature encoder runs on all frames at once below 200 frames, which dominates GPU memory on long
+        # clips; 16 frames at a time gives identical features
+        model.model.forward = functools.partial(model.model.forward, fmaps_chunk_size=16)
+        with torch.no_grad():
+            tracks, vis = model(video, queries=q[None].to(device))
+        tracks, vis = tracks[0].cpu().numpy(), vis[0].cpu().numpy()
+        del video
+    tracks = tracks / s  # T,N,2 in frame coords
+    vis = vis.astype(bool)  # T,N
+    del model
     torch.cuda.empty_cache()
-    print(f"  tracked {len(obj_id)} points over {len(frames)} frames, mean visibility {vis.mean():.0%}")
+    print(f"  tracked {len(obj_id)} points over {len(frames)} frames ({tracker}), mean visibility {vis.mean():.0%}")
     return tracks, vis, np.array(obj_id, dtype=np.int32)
 
 
@@ -277,7 +343,9 @@ class RectifiedStereo:
     Disparity is then d = u_left - u_right = f * B / Z, with Z along the rectified z axis.
     """
 
-    def __init__(self, calib_left, calib_right, hfov_deg=130.0, size=None):
+    def __init__(self, calib_left, calib_right, size=STEREO_SIZE, f=None):
+        """size: rectified image side (px). f: rectified focal length (px), default the left camera's native
+        focal length, so the image centre keeps the SLAM camera's full resolution (a smaller f downsamples)."""
         T_l = as_matrix(calib_left.get_transform_device_camera())
         T_r = as_matrix(calib_right.get_transform_device_camera())
         c_l, c_r = T_l[:3, 3], T_r[:3, 3]
@@ -290,9 +358,9 @@ class RectifiedStereo:
         self.R_dev_rect = np.stack([x, y, z], axis=1)   # columns: rect axes in device coords
         self.c_left = c_l
 
-        w, h = size if size else (int(v) for v in calib_left.get_image_size())
-        self.size = (int(w), int(h))
-        self.f = (w / 2.0) / np.tan(np.radians(hfov_deg) / 2.0)
+        w = h = int(size)
+        self.size = (w, h)
+        self.f = float(f) if f else float(calib_left.get_focal_lengths()[0])
         self.cx, self.cy = w / 2.0, h / 2.0
 
         self.map_l = self._build_map(calib_left, T_l)
@@ -300,6 +368,8 @@ class RectifiedStereo:
         ones = np.full((self.size[1], self.size[0]), 255, np.uint8)
         valid = cv2.remap(ones, *self.map_l, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
         self.valid_left = cv2.erode(valid.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+        valid_r = cv2.remap(ones, *self.map_r, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0
+        self.valid_right = cv2.erode(valid_r.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
 
     def _build_map(self, calib, T_c):
         w, h = self.size
@@ -338,6 +408,14 @@ class RectifiedStereo:
         disp = disparity_fn(l, r)
         P, valid = self.disparity_to_points(disp, *z_range)
         valid &= self.valid_left
+        # the matched right pixel (u - d, v) must be inside the right camera's view: the SLAM cameras are toed
+        # out, so much of the left view has no right counterpart and FoundationStereo returns guesses there
+        h, w = disp.shape
+        ur = np.round(np.arange(w)[None, :] - np.nan_to_num(disp, nan=-1.0)).astype(np.int64)
+        inside = (ur >= 0) & (ur < w)
+        vs = np.broadcast_to(np.arange(h)[:, None], (h, w))
+        inside[inside] = self.valid_right[vs[inside], ur[inside]]
+        valid &= inside
         return P, valid, disp, (l, r)
 
 
@@ -364,7 +442,9 @@ class FoundationStereoDisparity:
         if "vit_size" not in cfg:
             cfg["vit_size"] = "vitl"
         cfg["valid_iters"] = iters
-        self.model = FoundationStereo(cfg)
+        with warnings.catch_warnings():  # its DINOv2 (torch.hub) always reports its xFormers check; we use PyTorch SDPA
+            warnings.filterwarnings("ignore", message="xFormers is", category=UserWarning)
+            self.model = FoundationStereo(cfg)
         state = torch.load(ckpt, map_location="cpu", weights_only=False)  # no FS source patch needed
         self.model.load_state_dict(state["model"])
         self.model.cuda().eval()
@@ -453,21 +533,31 @@ def zbuffer_points(P_dev, proj, pix_scale, out_hw):
     return buf
 
 
-def lift_tracks(tracks, vis, frame_hw, slam_l, slam_r, T_wd, stereo, fs, proj_rgb, pix_scale):
+def lift_tracks(tracks, vis, frame_hw, slam_l, slam_r, T_wd, stereo, fs, proj_rgb, pix_scale, depth_video=False):
     """Give every visible tracked point a 3D position: device frame from stereo depth, then world.
 
     Returns points_world (T,N,3) and depth (T,N) (distance along the RGB optical axis), NaN where
     the point is hidden, has no stereo depth nearby, or the frame has no SLAM pair / VIO pose.
+    With depth_video, also returns one uint8 depth image per frame (rectified left view, see depth_to_color),
+    and runs FoundationStereo on every frame with a SLAM pair, not only the ones that need 3D points.
     """
     T, N = vis.shape
     H, W = frame_hw
     r = LIFT_RADIUS
     pts_world = np.full((T, N, 3), np.nan)
     depth = np.full((T, N), np.nan)
+    color = [np.zeros((*stereo.size[::-1], 3), np.uint8) for _ in range(T)] if depth_video else None
     for t in range(T):
-        if slam_l[t] is None or slam_r[t] is None or not np.isfinite(T_wd[t]).all() or not vis[t].any():
+        if slam_l[t] is None or slam_r[t] is None:
             continue
-        P, valid, _, _ = stereo.compute_points(slam_l[t], slam_r[t], disparity_fn=fs)
+        need_3d = np.isfinite(T_wd[t]).all() and vis[t].any()
+        if not (need_3d or depth_video):
+            continue
+        P, valid, disp, _ = stereo.compute_points(slam_l[t], slam_r[t], disparity_fn=fs)
+        if depth_video:
+            color[t] = depth_to_color(stereo, disp, valid)
+        if not need_3d:
+            continue
         buf = zbuffer_points(P[valid], proj_rgb, pix_scale, (H, W))
         for n in np.nonzero(vis[t])[0]:
             u, v = int(round(tracks[t, n, 0])), int(round(tracks[t, n, 1]))
@@ -482,7 +572,32 @@ def lift_tracks(tracks, vis, frame_hw, slam_l, slam_r, T_wd, stereo, fs, proj_rg
             pts_world[t, n] = T_wd[t, :3, :3] @ p_dev + T_wd[t, :3, 3]
         if (t + 1) % 25 == 0 or t == T - 1:
             print(f"  depth {t + 1}/{T} frames")
-    return pts_world, depth
+    return pts_world, depth, color
+
+
+def depth_to_color(stereo, disp, valid):
+    """Disparity in the rectified left view -> BGR uint8 depth image: turbo colour map over DEPTH_VIS_RANGE
+    (red = near, blue = far, farther clips to blue), darkened by Lambert shading of the surface normals so
+    thin objects and edges show (a 1-2 cm laptop is invisible in colour alone). Black = no depth."""
+    lo, hi = DEPTH_VIS_RANGE
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z = stereo.f * stereo.baseline / disp
+    ok = valid & np.isfinite(z)
+    level = np.nan_to_num(255 * (hi - np.clip(z, lo, hi)) / (hi - lo)).astype(np.uint8)
+    img = cv2.applyColorMap(level, cv2.COLORMAP_TURBO).astype(np.float32)
+    # normals of the rectified-frame surface (x right, y down, z forward), lit from the upper left of the camera
+    h, w = z.shape
+    us, vs = np.meshgrid(np.arange(w), np.arange(h))
+    zf = np.where(ok, z, np.nan)
+    P = np.stack([(us - stereo.cx) / stereo.f * zf, (vs - stereo.cy) / stereo.f * zf, zf], -1)
+    n = np.cross(np.gradient(P, axis=1), np.gradient(P, axis=0))
+    with np.errstate(invalid="ignore"):
+        n /= np.linalg.norm(n, axis=2, keepdims=True)
+    light = np.array([-0.4, -0.5, -1.0]) / np.linalg.norm([-0.4, -0.5, -1.0])
+    shade = np.nan_to_num(np.abs(n @ light), nan=1.0)
+    img *= (0.3 + 0.7 * shade)[..., None]
+    img[~ok] = 0
+    return img.astype(np.uint8)
 
 
 # ----------------------------------------------------------------------------- output
@@ -553,7 +668,7 @@ def draw_segmentation(rgb, boxes, masks0):
 
 
 def save_outputs(out_dir, stem, args, frames, rgb_ts, T_world_device, session_idx, boxes, masks0,
-                 tracks, vis, obj_id, points_world, depth, hand_lm_device, hand_uv):
+                 tracks, vis, obj_id, points_world, depth, hand_lm_device, hand_uv, depth_color=None):
     """Write <stem>_aina.npz (all results, raw, NaN for missing), <stem>_rgb.mp4 (the same T frames,
     downscaled to --video-width) and, unless --no-overlay, <stem>_overlay.mp4 (same frames with the
     tracked points drawn on). Frame t of the videos is row t of every per-frame array."""
@@ -597,10 +712,23 @@ def save_outputs(out_dir, stem, args, frames, rgb_ts, T_world_device, session_id
                 print(f"  wrote {path}  ({len(frames)} frames, {vw_}x{vh_}, {fps:.2f} fps, "
                       f"{os.path.getsize(path) / 1e6:.1f} MB)")
 
+    depth_video_file = ""
+    if depth_color is not None:
+        depth_video_file = f"{stem}_depth.mp4"
+        dpath = os.path.join(out_dir, depth_video_file)
+        dh, dw = depth_color[0].shape[:2]
+        dw_ = cv2.VideoWriter(dpath, cv2.VideoWriter_fourcc(*"mp4v"), fps, (dw, dh))
+        if not dw_.isOpened():
+            sys.exit(f"could not open a video writer for {dpath}")
+        for img in depth_color:
+            dw_.write(img)
+        dw_.release()
+        print(f"  wrote {dpath}  ({len(depth_color)} frames, {dw}x{dh}, {os.path.getsize(dpath) / 1e6:.1f} MB)")
+
     seg_file = f"{stem}_seg.jpg"
     seg_path = os.path.join(out_dir, seg_file)
-    cv2.imwrite(seg_path, draw_segmentation(frames[args.seg_frame], boxes, masks0))
-    print(f"  wrote {seg_path}  (frame {args.seg_frame} boxes + SAM 2 masks)")
+    cv2.imwrite(seg_path, draw_segmentation(frames[0], boxes, masks0))
+    print(f"  wrote {seg_path}  (frame 0 boxes + SAM 2 masks)")
 
     npz_path = os.path.join(out_dir, f"{stem}_aina.npz")
     np.savez_compressed(
@@ -631,11 +759,13 @@ def save_outputs(out_dir, stem, args, frames, rgb_ts, T_world_device, session_id
         start=np.int32(args.start),
         stride=np.int32(args.stride),
         scale=np.float64(args.scale),
-        seg_frame=np.int32(args.seg_frame),
+        tracker=args.tracker,
         frame_hw=np.array([H, W], dtype=np.int32),
-        n_points=np.int32(args.n_points),
+        n_points=np.array(N_POINTS, np.int32),
         video_file=np.array(video_file),
         overlay_file=np.array(overlay_file),
+        depth_video_file=np.array(depth_video_file),
+        depth_video_range_m=np.array(DEPTH_VIS_RANGE, np.float32),
         seg_file=np.array(seg_file),
         video_hw=np.array(video_hw, dtype=np.int32),
     )
@@ -646,21 +776,15 @@ def save_outputs(out_dir, stem, args, frames, rgb_ts, T_world_device, session_id
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--vrs", required=True)
-    ap.add_argument("--prompt", action="append", default=None,
-                    help="object to track, repeat for several (default: 'red cube' and 'cardboard box')")
-    ap.add_argument("--start", type=int, default=0)
+    ap.add_argument("--start", type=int, default=None,
+                    help="first RGB frame; default: auto, the first frame with settled exposure and a VIO pose")
     ap.add_argument("--stop", type=int, default=0, help="0 = until the end")
-    ap.add_argument("--stride", type=int, default=2)
+    ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--scale", type=float, default=1.0, help="downscale frames (memory/speed)")
-    ap.add_argument("--seg-frame", type=int, default=15,
-                    help="output frame (after --start/--stride, = row t of the npz/video) to segment on (default 0)")
-    ap.add_argument("--roi", action="store_true", help="draw the segmentation-frame boxes by hand instead of Grounding DINO")
-    ap.add_argument("--gdino", default="IDEA-Research/grounding-dino-base")
     ap.add_argument("--box-thr", type=float, default=0.25)
-    ap.add_argument("--text-thr", type=float, default=0.2)
-    ap.add_argument("--sam-model", default="sam2.1_l.pt",
-                    help="SAM 2.1 checkpoint (ultralytics auto-downloads): sam2.1_t/s/b/l.pt (default l, largest)")
-    ap.add_argument("--n-points", type=int, default=250, help="points sampled per object mask (default 200)")
+    ap.add_argument("--tracker", choices=["online", "offline"], default="online",
+                    help="CoTracker3 model: online (sliding windows, memory independent of clip length) or offline "
+                         "(whole clip at once, better through occlusions, needs more memory) (default online)")
     ap.add_argument("--fs-path", default=os.environ.get("FOUNDATION_STEREO_PATH") or os.path.normpath(FS_DEFAULT),
                     help="FoundationStereo repo root (default: $FOUNDATION_STEREO_PATH, else third_party/FoundationStereo)")
     ap.add_argument("--out-dir", default="output", help="results go to <out-dir>/<vrs stem>/ (default: output/)")
@@ -668,15 +792,21 @@ def main():
                     help="width of the saved RGB video, height keeps the aspect ratio (0 = no video)")
     ap.add_argument("--no-overlay", dest="overlay", action="store_false",
                     help="don't write <stem>_overlay.mp4 (the video with the tracked points drawn on)")
+    ap.add_argument("--no-depth-video", dest="depth_video", action="store_false",
+                    help="don't write <stem>_depth.mp4 (FoundationStereo depth, turbo colour map, red = near)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
-    prompts = args.prompt or ["red cube", "cardboard box"]
+    prompts = PROMPTS
+    assert len(N_POINTS) == len(PROMPTS), "N_POINTS needs one count per entry in PROMPTS"
     args.vrs = os.path.abspath(args.vrs)
     print("device:", args.device)
 
     from projectaria_tools.core import data_provider
 
-    dp = data_provider.create_vrs_data_provider(args.vrs)
+    with quiet_stderr():
+        dp = data_provider.create_vrs_data_provider(args.vrs)
+    if dp is None:
+        sys.exit(f"could not open {args.vrs}")
     calib = dp.get_device_calibration()
     cal_rgb = calib.get_camera_calib("camera-rgb")
     cal_l = calib.get_camera_calib("slam-front-left")
@@ -684,24 +814,35 @@ def main():
     if cal_rgb is None or cal_l is None or cal_r is None:
         sys.exit("Calibration for camera-rgb / slam-front-left / slam-front-right is missing.")
 
-    frames, rgb_ts = read_vrs(dp, args.start, args.stop, args.stride, args.scale)
-    slam_l, slam_r, T_world_device, session_idx = read_synced(dp, rgb_ts)
-    hand_lm_device = read_hands(dp, rgb_ts)
+    with quiet_stderr():  # our own progress prints go to stdout and still show
+        frames, rgb_ts = read_vrs(dp, args.start or 0, args.stop, args.stride, args.scale)
+        slam_l, slam_r, T_world_device, session_idx = read_synced(dp, rgb_ts)
+        hand_lm_device = read_hands(dp, rgb_ts)
 
-    if not 0 <= args.seg_frame < len(frames):
-        sys.exit(f"--seg-frame {args.seg_frame} is outside the {len(frames)} sampled frames")
-    seg_rgb = frames[args.seg_frame]
-    print(f"step 1: boxes on frame {args.seg_frame}")
-    boxes = boxes_manual(seg_rgb, prompts) if args.roi else boxes_grounding_dino(
-        seg_rgb, prompts, args.device, args.gdino, args.box_thr, args.text_thr)
+    if args.start is None:  # auto: skip the auto-exposure ramp and the frames before the first VIO pose
+        k, settle, pose = auto_start(frames, rgb_ts, T_world_device)
+        if settle is None:
+            print("  WARNING: brightness never settled; check the segmentation image")
+        print(f"  auto start at sampled frame {k} = RGB frame {k * args.stride} ({k / max(len(frames), 1):.0%} "
+              f"of the clip; exposure settled at {settle}, first pose at {pose})")
+        if k >= len(frames) - 1:
+            sys.exit("auto start left no frames; pass --start N")
+        frames, rgb_ts, T_world_device, session_idx = frames[k:], rgb_ts[k:], T_world_device[k:], session_idx[k:]
+        slam_l, slam_r, hand_lm_device = slam_l[k:], slam_r[k:], hand_lm_device[k:]
+        args.start = k * args.stride  # recorded in the npz as the RGB frame the clip starts at
+
+    seg_rgb = frames[0]
+    print("step 1: boxes on frame 0")
+    boxes = boxes_grounding_dino(seg_rgb, prompts, args.device, args.box_thr)
     if not boxes:
-        raise SystemExit("no boxes on the segmentation frame; use --roi, lower --box-thr or try another --seg-frame")
+        raise SystemExit("no boxes on frame 0; lower --box-thr or pick another start frame with --start")
 
-    print(f"step 2: SAM2 masks on frame {args.seg_frame}")
-    masks0 = masks_sam2(seg_rgb, boxes, args.sam_model)
+    print("step 2: SAM2 masks on frame 0")
+    masks0 = masks_sam2(seg_rgb, boxes)
 
     print("step 3: CoTracker3 point tracking")
-    tracks, vis, obj_id = track_points(frames, masks0, args.n_points, args.device, args.seg_frame)
+    tracks, vis, obj_id = track_points(frames, masks0, N_POINTS,
+                                      args.device, tracker=args.tracker)
 
     print("step 4: stereo depth (FoundationStereo) + lift to 3D")
     fs = FoundationStereoDisparity(args.fs_path)
@@ -712,8 +853,8 @@ def main():
     H, W = frames[0].shape[:2]
     pix_scale = W / float(cal_rgb.get_image_size()[0])  # calibration pixels -> downscaled frame pixels
     hand_uv = (proj_rgb.project(hand_lm_device.reshape(-1, 3)) * pix_scale).reshape(*hand_lm_device.shape[:3], 2)
-    points_world, depth = lift_tracks(tracks, vis, (H, W), slam_l, slam_r, T_world_device,
-                                      stereo, fs, proj_rgb, pix_scale)
+    points_world, depth, depth_color = lift_tracks(tracks, vis, (H, W), slam_l, slam_r, T_world_device,
+                                                  stereo, fs, proj_rgb, pix_scale, args.depth_video)
     del fs
     torch.cuda.empty_cache()
 
@@ -721,7 +862,7 @@ def main():
     stem = os.path.splitext(os.path.basename(args.vrs))[0]
     save_outputs(os.path.join(args.out_dir, stem), stem, args, frames, rgb_ts,
                  T_world_device, session_idx, boxes, masks0, tracks, vis, obj_id, points_world, depth,
-                 hand_lm_device, hand_uv)
+                 hand_lm_device, hand_uv, depth_color)
 
     # Sanity summary. "jitter" = how much each point moves in world during the first second that
     # has 3D data (VIO often has no valid pose for the first ~0.5 s); objects should be still then.
