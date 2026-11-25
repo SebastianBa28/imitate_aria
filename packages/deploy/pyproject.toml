@@ -1,0 +1,13 @@
+[project]
+name = "imitate-deploy"
+version = "0.1.0"
+description = "Robot side of imitate_aria: ROS 2 nodes, policy runner and the deployment dashboard server"
+requires-python = ">=3.10"
+dependencies = []  # provided by pixi.toml (ROS from RoboStack)
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["deploy*"]

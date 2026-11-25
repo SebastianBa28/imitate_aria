@@ -1,0 +1,67 @@
+# Robot-side environment (ROS 2 Jazzy from RoboStack), separate from the repo's uv env.
+# Same lockfile for the Ubuntu dev box and the Apple Silicon Mac at the robot.
+#
+#   cd packages/deploy
+#   pixi run test            # unit tests
+#   pixi run mock            # whole station with simulated hand, arm and camera -> http://127.0.0.1:8000
+#   pixi run -e hw real      # ORCA hand + RealSense (the Franka controller runs on its own machine)
+#   pixi run -e web web-build   # build the dashboard (packages/dashboard/web)
+
+[workspace]
+name = "imitate-deploy"
+channels = ["robostack-jazzy", "conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+
+[dependencies]
+python = "3.12.*"
+ros-jazzy-ros-base = "*"        # rclpy, launch, ros2 CLI, common_interfaces, rosbag2
+numpy = "*"
+pyyaml = "*"
+opencv = "*"
+fastapi = "*"
+uvicorn = "*"
+websockets = "*"
+pytest = "*"
+
+[pypi-dependencies]
+imitate-common = { path = "../common", editable = true }
+imitate-deploy = { path = ".", editable = true }
+
+# --- hardware drivers: only on the robot machine -------------------------------------------
+[feature.hw.dependencies]
+pyserial = "*"
+
+[feature.hw.pypi-dependencies]
+# rwr_system installed this with --no-deps because it declared a newer numpy than rwr pinned.
+# Here numpy is not pinned; if the solve still conflicts, see spike/README.md.
+orca_core = "==0.5.2"
+
+[feature.hw.target.linux-64.pypi-dependencies]
+pyrealsense2 = "*"
+
+[feature.hw.target.osx-arm64.pypi-dependencies]
+# Intel ships no macOS wheels; this is the community build. Verify in spike/realsense_check.py.
+pyrealsense2-macosx = "*"
+
+# --- dashboard build tools ------------------------------------------------------------------
+[feature.web.dependencies]
+nodejs = ">=20"
+
+[environments]
+default = { solve-group = "main" }
+hw = { features = ["hw"], solve-group = "main" }
+web = { features = ["web"], no-default-feature = true }
+
+[tasks]
+test = "pytest -q tests ../common/tests"
+mock = "ros2 launch launch/robot.launch.py profile:=mock"
+real = "ros2 launch launch/robot.launch.py profile:=real"
+station = "python -m deploy.station.server"
+spike-env = "python spike/check_env.py"
+spike-ping = "python spike/ros_ping.py"
+spike-realsense = "python spike/realsense_check.py"
+spike-orca = "python spike/orca_check.py"
+
+[feature.web.tasks]
+web-build = { cmd = "npm install && npm run build", cwd = "../dashboard/web" }
+web-dev = { cmd = "npm install && npm run dev", cwd = "../dashboard/web" }

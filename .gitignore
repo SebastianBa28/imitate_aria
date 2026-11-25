@@ -44,3 +44,9 @@ third_party/
 datasets/
 
 CLAUDE.md 
+
+# robot env (packages/deploy): pixi environment and dashboard build output (pixi.lock is committed)
+.pixi/
+node_modules/
+packages/dashboard/web/dist/
+spike_realsense.png

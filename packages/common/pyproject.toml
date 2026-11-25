@@ -1,0 +1,13 @@
+[project]
+name = "imitate-common"
+version = "0.1.0"
+description = "Shared robot spec for imitate_aria: joint order and limits, topic contract, frame transforms (numpy only)"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["imitate_common*"]

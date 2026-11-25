@@ -1,0 +1,48 @@
+# Robot station config, read by every node in packages/deploy (deploy/config.py).
+# Paths are relative to packages/deploy/. Override the whole file with IMITATE_DEPLOY_CONFIG=/path.yaml
+
+hand:
+  config_dir: config/orca/right     # orca_core config.yaml; calibration.yaml is written next to it
+  state_hz: 100
+  max_step_deg: 4.0                 # largest change per command, per joint (hand_node rejects nothing, it clips)
+
+arm:
+  # every policy arm target is clipped to this box (m, in ARM_FRAME) and stepped from the last target
+  workspace: {x: [0.25, 0.75], y: [-0.40, 0.40], z: [0.05, 0.60]}
+  max_step_m: 0.01                  # per policy tick
+  max_step_deg: 3.0                 # per policy tick
+  home: null                        # [x, y, z, qx, qy, qz, qw]: set to a pose checked at this station
+  stale_s: 0.2                      # policy stops if the arm pose is older than this
+
+camera:
+  width: 640
+  height: 480
+  fps: 30
+
+policy:
+  hz: 10
+  plugin: deploy.policies.demo:DemoPolicy   # module:Class implementing deploy.policies.base.Policy
+  checkpoint: null
+  uses_arm: true
+  stale_s: 0.2                      # policy stops if the hand state is older than this
+
+mock:
+  video: null                       # e.g. ../../output/rubiks_nov24/rubiks_nov24_rgb.mp4; null = test pattern
+  arm_start: [0.45, 0.0, 0.35, 1.0, 0.0, 0.0, 0.0]   # gripper pointing down
+  hand_tau_s: 0.08                  # first-order lag of the simulated hand
+  arm_tau_s: 0.15
+
+station:
+  host: 127.0.0.1                   # 0.0.0.0 to open the dashboard from another machine (no login!)
+  port: 8000
+  stream_hz: 30
+  camera_hz: 15
+  jpeg_quality: 70
+  history_s: 60
+  # expected rate per topic for the health lights; missing topics show as missing
+  expected_hz:
+    /right/hand/joint_states: 100
+    /right/arm/end_effector_pose: 100
+    /camera/color/image_raw: 30
+    /camera/depth/image_raw: 30
+    /policy/metrics: 10
