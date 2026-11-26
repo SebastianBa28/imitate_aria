@@ -4,7 +4,7 @@ Subscribes HAND_COMMAND (JointState, rad, any subset of joints by name), publish
 (JointState, rad, all 17 joints) at hand.state_hz. Services: HAND_ESTOP (true = release torque and
 disconnect; restart the node afterwards) and HAND_TORQUE.
 
-Every command is clamped to the ranges of motion and to hand.max_step_deg away from the previous
+Every command is clamped to the ranges of motion and, if hand.max_step_deg is set, to that far from the previous
 command. Unlike rwr_system, a hand without calibration.yaml does not calibrate on its own:
 start with -p calibrate:=true to do that deliberately (the fingers move through their full range).
 
@@ -95,7 +95,8 @@ class HandNode(Node):
             self.backend = OrcaBackend(cfg.resolve(self.hc["config_dir"]) / "config.yaml", calibrate)
         self.get_logger().info(f"hand backend: {type(self.backend).__name__}")
 
-        self.max_step = np.deg2rad(self.hc["max_step_deg"])
+        step = self.hc.get("max_step_deg")
+        self.max_step = None if step is None else np.deg2rad(step)  # None: commands go straight through
         q0, _ = self.backend.read()
         q0 = np.deg2rad(q0)
         self.last_cmd = np.where(np.isnan(q0), hand.NEUTRAL_RAD, q0)

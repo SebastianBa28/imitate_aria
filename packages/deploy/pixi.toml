@@ -5,12 +5,20 @@
 #   pixi run test            # unit tests
 #   pixi run mock            # whole station with simulated hand, arm and camera -> http://127.0.0.1:8000
 #   pixi run -e hw real      # ORCA hand + RealSense (the Franka controller runs on its own machine)
-#   pixi run -e web web-build   # build the dashboard (packages/dashboard/web)
+#   (the dashboard is a static page in packages/dashboard/web, served by the station: no build step)
 
 [workspace]
 name = "imitate-deploy"
 channels = ["robostack-jazzy", "conda-forge"]
 platforms = ["linux-64", "osx-arm64"]
+
+[activation]
+scripts = ["config/station_env.sh"]   # sets ROBOT_NET_IP for config/fastdds.xml
+
+[activation.env]
+# large camera frames need a bigger shared-memory segment than Fast DDS's default (see the file)
+FASTRTPS_DEFAULT_PROFILES_FILE = "$PIXI_PROJECT_ROOT/config/fastdds.xml"
+FASTDDS_DEFAULT_PROFILES_FILE = "$PIXI_PROJECT_ROOT/config/fastdds.xml"
 
 [dependencies]
 python = "3.12.*"
@@ -19,7 +27,7 @@ numpy = "*"
 pyyaml = "*"
 opencv = "*"
 fastapi = "*"
-uvicorn = "*"
+uvicorn = ">=0.34.2,<0.35"   # orca_core 0.5.2 (hw) requires this range; default and hw share a solve group
 websockets = "*"
 pytest = "*"
 
@@ -43,25 +51,21 @@ pyrealsense2 = "*"
 # Intel ships no macOS wheels; this is the community build. Verify in spike/realsense_check.py.
 pyrealsense2-macosx = "*"
 
-# --- dashboard build tools ------------------------------------------------------------------
-[feature.web.dependencies]
-nodejs = ">=20"
-
 [environments]
 default = { solve-group = "main" }
 hw = { features = ["hw"], solve-group = "main" }
-web = { features = ["web"], no-default-feature = true }
 
 [tasks]
+# ROS domains: the Franka controller (multipanda_ros2 on the NUC) uses 7; simulation uses 0 so a mock
+# station can never talk to the real arm (the launch file also refuses profile:=mock on domain 7).
 test = "pytest -q tests ../common/tests"
-mock = "ros2 launch launch/robot.launch.py profile:=mock"
-real = "ros2 launch launch/robot.launch.py profile:=real"
+mock = { cmd = "ros2 launch launch/robot.launch.py profile:=mock", env = { ROS_DOMAIN_ID = "0" } }
+real = { cmd = "ros2 launch launch/robot.launch.py profile:=real", env = { ROS_DOMAIN_ID = "7" } }
+# real arm + RealSense with a simulated hand (before the ORCA hand is connected);
+# append camera:=mock to also simulate the camera, e.g. `pixi run -e hw real-arm camera:=mock`
+real-arm = { cmd = "ros2 launch launch/robot.launch.py profile:=real hand:=mock", env = { ROS_DOMAIN_ID = "7" } }
 station = "python -m deploy.station.server"
 spike-env = "python spike/check_env.py"
-spike-ping = "python spike/ros_ping.py"
+spike-ping = { cmd = "python spike/ros_ping.py", env = { ROS_DOMAIN_ID = "7" } }
 spike-realsense = "python spike/realsense_check.py"
 spike-orca = "python spike/orca_check.py"
-
-[feature.web.tasks]
-web-build = { cmd = "npm install && npm run build", cwd = "../dashboard/web" }
-web-dev = { cmd = "npm install && npm run dev", cwd = "../dashboard/web" }

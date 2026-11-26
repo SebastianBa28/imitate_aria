@@ -4,6 +4,12 @@ import pytest
 from imitate_common import hand, transforms
 
 
+def test_step_limit_none_means_no_limit():
+    cur, tgt = np.zeros(17), np.full(17, 1.5)
+    assert np.allclose(hand.step_limit(cur, tgt, None), tgt)
+    assert np.allclose(hand.step_limit(cur, tgt, 0.1), 0.1)
+
+
 def test_hand_tables_cover_every_joint():
     assert hand.NUM_JOINTS == 17
     assert set(hand.ROM_DEG) == set(hand.JOINT_NAMES) == set(hand.NEUTRAL_DEG)

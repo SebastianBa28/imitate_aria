@@ -27,13 +27,13 @@ from rclpy.executors import SingleThreadedExecutor
 from deploy import config as cfg
 from deploy.station.bridge import EventLog, StationBridge
 from deploy.station.buffers import SeriesStore
-from deploy.station.camera import CameraEncoder
+from deploy.station.camera import DEPTH_RANGE_MM, CameraEncoder
 from deploy.station.monitor import HealthBoard
 from imitate_common import hand
 
 CONF = cfg.load()
 SC = CONF["station"]
-WEB_DIST = cfg.DEPLOY_ROOT.parent / "dashboard" / "web" / "dist"
+WEB_DIR = cfg.DEPLOY_ROOT.parent / "dashboard" / "web"   # static page, no build step
 ROBOT_ASSETS = cfg.DEPLOY_ROOT / "assets" / "robot"
 CHANNELS = {"color": 0, "depth": 1}
 SNAPSHOT_POINTS, TICK_POINTS = 1500, 60
@@ -91,7 +91,13 @@ def get_config():
         "expected_hz": SC["expected_hz"],
         "history_s": SC["history_s"],
         "stream_hz": SC["stream_hz"],
-        "policy": {"plugin": CONF["policy"]["plugin"], "hz": CONF["policy"]["hz"], "checkpoint": CONF["policy"].get("checkpoint")},
+        "policy": {"plugin": CONF["policy"]["plugin"], "hz": CONF["policy"]["hz"], "checkpoint": CONF["policy"].get("checkpoint"),
+                   "uses_arm": CONF["policy"].get("uses_arm", True)},
+        "arm": {"workspace": CONF["arm"]["workspace"], "home": CONF["arm"].get("home")},
+        "manual": CONF.get("manual", {}),
+        "hand_neutral": hand.NEUTRAL_RAD.tolist(),
+        "camera": {"width": CONF["camera"]["width"], "height": CONF["camera"]["height"], "fps": CONF["camera"]["fps"],
+                   "stream_hz": SC["camera_hz"], "depth_range_mm": list(DEPTH_RANGE_MM)},
         "robot_assets": ROBOT_ASSETS.exists(),
     }
 
@@ -122,6 +128,13 @@ async def command(c: Command):
         return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
     S.events.add("info" if ok else "error", "dashboard", f"{c.target} {c.cmd}: {msg}")
     return {"ok": ok, "message": msg}
+
+
+@app.post("/api/manual")
+def manual(targets: dict):
+    """Manual targets while the policy node is in "manual" (format: deploy/manual.py). Not logged per call."""
+    ok, msg = S.bridge.send_manual(targets)
+    return JSONResponse({"ok": ok, "message": msg}, status_code=200 if ok else 409)
 
 
 @app.websocket("/ws")
@@ -162,14 +175,13 @@ async def ws(socket: WebSocket):
 
 if ROBOT_ASSETS.exists():
     app.mount("/robot", StaticFiles(directory=ROBOT_ASSETS), name="robot")
-if WEB_DIST.exists():
-    app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
+if (WEB_DIR / "index.html").exists():
+    app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
 else:
     @app.get("/")
-    def no_build():
-        return HTMLResponse("<h1>Dashboard not built</h1><p>Run <code>pixi run -e web web-build</code> in "
-                            "packages/deploy, then restart the station. The API is up: "
-                            "<a href='/api/config'>/api/config</a>.</p>")
+    def no_page():
+        return HTMLResponse(f"<h1>Dashboard page not found</h1><p>Expected {WEB_DIR / 'index.html'}. "
+                            "The API is up: <a href='/api/config'>/api/config</a>.</p>")
 
 
 def main():

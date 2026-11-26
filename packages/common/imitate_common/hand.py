@@ -58,7 +58,9 @@ def reorder(names, values):
 
 
 def step_limit(q_current, q_target, max_step):
-    """Move from q_current toward q_target by at most max_step (rad) per joint."""
+    """Move from q_current toward q_target by at most max_step (rad) per joint. max_step None = no limit."""
+    if max_step is None:
+        return np.asarray(q_target, dtype=np.float64).copy()
     q_current = np.asarray(q_current, dtype=np.float64)
     delta = np.clip(np.asarray(q_target, dtype=np.float64) - q_current, -max_step, max_step)
     return q_current + delta

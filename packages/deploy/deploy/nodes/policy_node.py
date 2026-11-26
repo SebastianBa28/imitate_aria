@@ -1,12 +1,17 @@
 """Runs a policy at policy.hz and is the only node that sends policy commands to the robot.
 
-Commands (std_msgs/String on POLICY_COMMAND): start, stop, reset, home, live, preview.
+Commands (std_msgs/String on POLICY_COMMAND): start, stop, reset, home, manual, live, preview.
+- manual: no policy; targets come from the dashboard on POLICY_MANUAL (deploy/manual.py), start at the
+  measured state and are followed with the slower manual.* step limits. "stop" leaves manual.
 - preview (default at startup): actions are published on /policy/action_* only, the robot does not move.
 - live: actions also go to HAND_COMMAND / ARM_POSE_CMD. Mode can only change while idle.
 Safety, applied to every action in both modes (so preview shows what live would send):
 hand targets clamped to the ROMs and stepped by at most hand.max_step_deg per tick from the last
 target; arm targets clipped to arm.workspace and stepped by arm.max_step_m / max_step_deg per tick.
 Stale observations (older than *.stale_s) or a policy exception stop the run with status "fault".
+Live only: an arm command is never more than arm.max_lead_m ahead of the measured pose (a stalled or
+lagging arm cannot wind up commands, as in rwr_system's arm init), and start/home/manual refuse when no
+arm controller subscribes to ARM_POSE_CMD or the arm reports its pose in a frame other than ARM_FRAME.
 
 Publishes POLICY_STATE (latched JSON) and POLICY_METRICS (JSON per tick):
 latency_ms, loop_hz, obs_age_ms.{hand,arm,color}, hand_clip_deg, arm_clip_mm, policy.<info keys>.
@@ -25,6 +30,7 @@ from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import String
 
 from deploy import config as cfg
+from deploy.manual import ManualTargets
 from deploy.policies.base import Observation
 from deploy.ros_util import (LATCHED_QOS, SENSOR_QOS, image_to_numpy, joint_state_msg, pose_from_msg,
                              pose_msg)
@@ -44,13 +50,22 @@ class PolicyNode(Node):
         pc, ac = self.conf["policy"], self.conf["arm"]
         self.policy = load_policy(self.conf)
         self.uses_arm = bool(pc.get("uses_arm", True))
-        self.hand_step = np.deg2rad(self.conf["hand"]["max_step_deg"])
+        hs = self.conf["hand"].get("max_step_deg")
+        self.hand_step = None if hs is None else np.deg2rad(hs)  # None: no per-tick limit
         self.arm_step_m, self.arm_step_rad = ac["max_step_m"], np.deg2rad(ac["max_step_deg"])
         ws = ac["workspace"]
         self.ws_lo = np.array([ws["x"][0], ws["y"][0], ws["z"][0]])
         self.ws_hi = np.array([ws["x"][1], ws["y"][1], ws["z"][1]])
         self.home = None if ac.get("home") is None else np.asarray(ac["home"], dtype=np.float64)
         self.hand_stale, self.arm_stale = pc["stale_s"], ac["stale_s"]
+        self.arm_max_lead = ac.get("max_lead_m", 0.02)
+        self.arm_frame = None
+        mc = self.conf.get("manual", {})
+        mhs = mc.get("hand_max_step_deg")
+        self.manual_hand_step = None if mhs is None else np.deg2rad(mhs)  # None: sliders go straight through
+        self.manual_arm_step_m = mc.get("arm_max_step_m", 0.002)
+        self.manual_arm_step_rad = np.deg2rad(mc.get("arm_max_step_deg", 1.0))
+        self.manual = ManualTargets(self.ws_lo, self.ws_hi, mc.get("max_jog_m", 0.05))
 
         self.status, self.mode, self.message, self.steps = "idle", "preview", "", 0
         self.hand_q = self.arm = self.color = self.depth = self.K = None
@@ -65,6 +80,7 @@ class PolicyNode(Node):
             self.create_subscription(Image, contract.CAMERA_DEPTH, self.on_depth, SENSOR_QOS)
             self.create_subscription(CameraInfo, contract.CAMERA_INFO, self.on_info, LATCHED_QOS)
         self.create_subscription(String, contract.POLICY_COMMAND, self.on_command, 10)
+        self.create_subscription(String, contract.POLICY_MANUAL, self.on_manual, 10)
         self.action_hand_pub = self.create_publisher(JointState, contract.POLICY_ACTION_HAND, 10)
         self.action_arm_pub = self.create_publisher(PoseStamped, contract.POLICY_ACTION_ARM, 10)
         self.hand_cmd_pub = self.create_publisher(JointState, contract.HAND_COMMAND, 10)
@@ -85,6 +101,7 @@ class PolicyNode(Node):
 
     def on_arm(self, msg):
         self.arm, self.t_arm = pose_from_msg(msg), self.now()
+        self.arm_frame = msg.header.frame_id
 
     def on_color(self, msg):
         self.color, self.t_color = image_to_numpy(msg), self.now()
@@ -108,6 +125,17 @@ class PolicyNode(Node):
             a = self.age(self.t_arm)
             if a is None or a > self.arm_stale:
                 return "arm pose missing or stale"
+            if self.arm_frame != contract.ARM_FRAME:
+                return f"arm pose is in frame {self.arm_frame!r}, commands use {contract.ARM_FRAME!r}"
+        return None
+
+    def arm_controller_reason(self):
+        """Live only: someone other than the dashboard station must listen to arm commands."""
+        if self.mode != "live" or not self.uses_arm:
+            return None
+        listeners = [i for i in self.get_subscriptions_info_by_topic(contract.ARM_POSE_CMD) if i.node_name != "station"]
+        if not listeners:
+            return f"no arm controller subscribed to {contract.ARM_POSE_CMD} (is the Franka controller running?)"
         return None
 
     def observation(self):
@@ -139,14 +167,21 @@ class PolicyNode(Node):
                 return False, "stop first: mode only changes while idle"
             self.mode = cmd
             return True, ""
-        if cmd in ("start", "home"):
+        if cmd in ("start", "home", "manual"):
             if self.status not in ("idle", "fault"):
                 return False, f"already {self.status}"
-            reason = self.stale_reason()
+            reason = self.stale_reason() or self.arm_controller_reason()
             if reason:
                 return False, reason
+            if cmd == "manual":
+                why = self.manual.start(self.hand_q, self.arm if self.uses_arm else None)
+                if why:
+                    return False, why
             self.last_hand = self.hand_q.copy()
             self.last_arm = (self.arm[0].copy(), self.arm[1].copy()) if self.uses_arm else None
+            if cmd == "manual":
+                self.status = "manual"
+                return True, ""
             if cmd == "start":
                 try:
                     self.policy.reset(self.observation())
@@ -156,6 +191,31 @@ class PolicyNode(Node):
             self.status = "running" if cmd == "start" else "homing"
             return True, ""
         return False, "unknown command"
+
+    def on_manual(self, msg):
+        if self.status != "manual":
+            return  # targets only count while in manual; ignore stale dashboard messages
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            data = None
+        why = self.manual.apply(data, None if self.arm is None else self.arm[0])
+        if why:
+            self.message = f"manual: {why}"
+            self.get_logger().warning(self.message)
+        elif isinstance(data, dict) and ("hand" in data or data.get("hand_neutral")) and self.manual_hand_step is None:
+            self.send_hand_now()  # no speed limit: don't wait for the next tick
+        self.publish_state()
+
+    def send_hand_now(self):
+        """Manual hand target straight to the hand (clamped to the ROMs), between ticks."""
+        if self.stale_reason():
+            return  # the next tick faults
+        self.last_hand = hand.clamp_rad(self.manual.hand)
+        msg = joint_state_msg(self.get_clock().now().to_msg(), hand.JOINT_NAMES, self.last_hand)
+        self.action_hand_pub.publish(msg)
+        if self.mode == "live":
+            self.hand_cmd_pub.publish(msg)
 
     def fault(self, why):
         self.status, self.message = "fault", why
@@ -167,14 +227,19 @@ class PolicyNode(Node):
         now = time.perf_counter()
         loop_hz = None if self.last_tick is None else 1.0 / max(now - self.last_tick, 1e-6)
         self.last_tick = now
-        if self.status not in ("running", "homing"):
+        if self.status not in ("running", "homing", "manual"):
             return
         reason = self.stale_reason()
         if reason:
             return self.fault(reason)
 
         info, latency_ms = {}, 0.0
-        if self.status == "running":
+        hand_step, arm_step_m, arm_step_rad = self.hand_step, self.arm_step_m, self.arm_step_rad
+        if self.status == "manual":
+            hand_t = self.manual.hand
+            arm_t = None if self.manual.arm_pos is None else (self.manual.arm_pos, self.manual.arm_quat)
+            hand_step, arm_step_m, arm_step_rad = self.manual_hand_step, self.manual_arm_step_m, self.manual_arm_step_rad
+        elif self.status == "running":
             t0 = time.perf_counter()
             try:
                 action = self.policy.act(self.observation())
@@ -191,12 +256,17 @@ class PolicyNode(Node):
         hand_clip = arm_clip = 0.0
         if hand_t is not None:
             raw = np.asarray(hand_t, dtype=np.float64)
-            self.last_hand = hand.step_limit(self.last_hand, hand.clamp_rad(raw), self.hand_step)
+            self.last_hand = hand.step_limit(self.last_hand, hand.clamp_rad(raw), hand_step)
             hand_clip = float(np.rad2deg(np.nanmax(np.abs(raw - self.last_hand))))
         if arm_t is not None and self.last_arm is not None:
             raw_pos = np.asarray(arm_t[0], dtype=np.float64)
             target = np.clip(raw_pos, self.ws_lo, self.ws_hi)
-            pos, quat = step_pose(*self.last_arm, target, quat_normalize(arm_t[1]), self.arm_step_m, self.arm_step_rad)
+            pos, quat = step_pose(*self.last_arm, target, quat_normalize(arm_t[1]), arm_step_m, arm_step_rad)
+            if self.mode == "live":  # no wind-up: stay within max_lead of where the arm actually is
+                lead = pos - self.arm[0]
+                dist = float(np.linalg.norm(lead))
+                if dist > self.arm_max_lead:
+                    pos = self.arm[0] + lead * (self.arm_max_lead / dist)
             self.last_arm = (pos, quat)
             arm_clip = float(np.linalg.norm(raw_pos - pos) * 1e3)
 
@@ -227,7 +297,8 @@ class PolicyNode(Node):
     def publish_state(self):
         state = {"status": self.status, "mode": self.mode, "message": self.message, "steps": self.steps,
                  "plugin": self.conf["policy"]["plugin"], "uses_arm": self.uses_arm,
-                 "home_configured": self.home is not None}
+                 "home_configured": self.home is not None,
+                 "manual": self.manual.as_dict() if self.status == "manual" else None}
         self.state_pub.publish(String(data=json.dumps(state)))
 
 

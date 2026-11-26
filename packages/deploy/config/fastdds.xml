@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Fast DDS transports for the station (loaded via [activation.env] in pixi.toml).
+  The default shared-memory segment (512 KB) is smaller than one camera frame (640x480 rgb8 = 900 KB),
+  so best-effort images fell back to UDP and most were lost: 30 Hz published, ~5 Hz received.
+  A 16 MB segment delivers all of them between processes on this machine. UDPv4 stays enabled for
+  the Franka controller on its own machine, restricted to the robot network: ${ROBOT_NET_IP} is set by
+  config/station_env.sh. Without the restriction, Fast DDS announced every interface (wired, Wi-Fi,
+  docker) and the controller's CycloneDDS never delivered /right/arm/end_effector_pose to us.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>shm_large</transport_id>
+      <type>SHM</type>
+      <segment_size>16777216</segment_size>
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>udp</transport_id>
+      <type>UDPv4</type>
+      <interfaceWhiteList>
+        <address>${ROBOT_NET_IP}</address>
+        <address>127.0.0.1</address>
+      </interfaceWhiteList>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="station_default" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>shm_large</transport_id>
+        <transport_id>udp</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

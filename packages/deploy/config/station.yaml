@@ -4,7 +4,8 @@
 hand:
   config_dir: config/orca/right     # orca_core config.yaml; calibration.yaml is written next to it
   state_hz: 100
-  max_step_deg: 4.0                 # largest change per command, per joint (hand_node rejects nothing, it clips)
+  max_step_deg: null                # largest change per command, per joint (deg); null = commands go straight
+                                    # to the motors, as in rwr_system (current-based position mode limits force)
 
 arm:
   # every policy arm target is clipped to this box (m, in ARM_FRAME) and stepped from the last target
@@ -12,10 +13,12 @@ arm:
   max_step_m: 0.01                  # per policy tick
   max_step_deg: 3.0                 # per policy tick
   home: null                        # [x, y, z, qx, qy, qz, qw]: set to a pose checked at this station
+                                    # (rwr_system's right-arm start: [0.45, 0.0, 0.2, 1, 0, 0, 0], gripper down)
   stale_s: 0.2                      # policy stops if the arm pose is older than this
+  max_lead_m: 0.02                  # live: a command is never further than this from the measured pose
 
 camera:
-  width: 640
+  width: 848
   height: 480
   fps: 30
 
@@ -25,6 +28,13 @@ policy:
   checkpoint: null
   uses_arm: true
   stale_s: 0.2                      # policy stops if the hand state is older than this
+
+manual:
+  # dashboard manual control (policy_node status "manual"): slower than policy limits on purpose
+  hand_max_step_deg: null           # per policy tick (deg); null = sliders go straight to the hand, no delay
+  arm_max_step_m: 0.002             # per policy tick (10 Hz -> 2 cm/s)
+  arm_max_step_deg: 1.0             # per policy tick; manual keeps the orientation it started with
+  max_jog_m: 0.05                   # largest single jog the dashboard may send
 
 mock:
   video: null                       # e.g. ../../output/rubiks_nov24/rubiks_nov24_rgb.mp4; null = test pattern
@@ -42,7 +52,7 @@ station:
   # expected rate per topic for the health lights; missing topics show as missing
   expected_hz:
     /right/hand/joint_states: 100
-    /right/arm/end_effector_pose: 100
+    /right/arm/end_effector_pose: 30   # multipanda_ros2 publishes ~30 Hz (measured with spike-ping arm)
     /camera/color/image_raw: 30
     /camera/depth/image_raw: 30
     /policy/metrics: 10

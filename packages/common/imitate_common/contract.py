@@ -25,4 +25,5 @@ POLICY_ACTION_HAND = "/policy/action_hand"         # JointState, published in pr
 POLICY_ACTION_ARM = "/policy/action_arm"           # PoseStamped, published in preview and live
 POLICY_METRICS = "/policy/metrics"                 # std_msgs/String, JSON (see policy_node)
 POLICY_STATE = "/policy/state"                     # std_msgs/String, JSON, latched
-POLICY_COMMAND = "/policy/command"                 # std_msgs/String: start|stop|reset|home|live|preview; result shows in POLICY_STATE
+POLICY_COMMAND = "/policy/command"                 # std_msgs/String: start|stop|reset|home|manual|live|preview; result shows in POLICY_STATE
+POLICY_MANUAL = "/policy/manual"                   # std_msgs/String, JSON manual targets (see deploy/manual.py)

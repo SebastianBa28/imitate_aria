@@ -15,7 +15,7 @@ from std_srvs.srv import SetBool
 from deploy.ros_util import LATCHED_QOS, SENSOR_QOS, pose_from_msg
 from imitate_common import contract, hand
 
-POLICY_COMMANDS = ("start", "stop", "reset", "home", "live", "preview")
+POLICY_COMMANDS = ("start", "stop", "reset", "home", "manual", "live", "preview")
 
 
 class EventLog:
@@ -70,6 +70,7 @@ class StationBridge(Node):
         self.create_subscription(CameraInfo, contract.CAMERA_INFO, self.on_info, LATCHED_QOS)
 
         self.policy_cmd_pub = self.create_publisher(String, contract.POLICY_COMMAND, 10)
+        self.manual_pub = self.create_publisher(String, contract.POLICY_MANUAL, 10)
         self.estop_client = self.create_client(SetBool, contract.HAND_ESTOP)
         self.torque_client = self.create_client(SetBool, contract.HAND_TORQUE)
 
@@ -136,7 +137,10 @@ class StationBridge(Node):
         with self._lock:
             self.policy_state = state
         if state.get("message") and state.get("message") != old.get("message"):
-            level = "error" if state.get("status") == "fault" else "info"
+            msg = state["message"]
+            # policy_node reports "<cmd>: ok" on success and "<cmd>: <reason>" when it refuses a command
+            refused = ": " in msg and not msg.endswith(": ok") and not msg.startswith("home:")
+            level = "error" if state.get("status") == "fault" else "warn" if refused else "info"
             self.events.add(level, "policy", state["message"])
         elif old and (state.get("status"), state.get("mode")) != (old.get("status"), old.get("mode")):
             self.events.add("info", "policy", f"{state.get('status')} ({state.get('mode')})")
@@ -163,6 +167,13 @@ class StationBridge(Node):
         self.policy_cmd_pub.publish(String(data=cmd))
         if self.count_subscribers(contract.POLICY_COMMAND) == 0:
             return False, "no policy_node is running"
+        return True, "sent"
+
+    def send_manual(self, targets):
+        """Forward dashboard manual targets; policy_node validates and clamps them."""
+        if self.policy_state.get("status") != "manual":
+            return False, "not in manual mode"
+        self.manual_pub.publish(String(data=json.dumps(targets)))
         return True, "sent"
 
     def call_setbool(self, client, value, timeout_s=3.0):
