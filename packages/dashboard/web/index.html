@@ -26,6 +26,31 @@
   <div id="live-banner" class="live-banner" hidden>LIVE: commands are sent to the robot</div>
 
   <main class="grid">
+    <!-- processes started by the station (deploy/station/supervisor.py) -->
+    <section class="card full" id="proc-card" aria-labelledby="proc-h">
+      <div class="card-head">
+        <h2 id="proc-h">Processes <span id="proc-profile" class="muted"></span></h2>
+        <button id="proc-start-all" class="primary small">Start all</button>
+        <button id="proc-stop-all" class="small">Stop all</button>
+      </div>
+      <p id="proc-refusal" class="message" data-level="error" hidden></p>
+      <div class="proc-body">
+        <div>
+          <table class="procs">
+            <thead><tr><th>Process</th><th>Status</th><th>Details</th><th class="r">Actions</th></tr></thead>
+            <tbody id="proc-body"></tbody>
+          </table>
+          <p id="proc-result" class="cmd-result" aria-live="polite"></p>
+          <p class="hint">Processes started here stop when the station stops. "External" means the topic is already
+            published by a process started elsewhere (e.g. <code>pixi run mock</code>); stop it there first.</p>
+        </div>
+        <div class="proc-log">
+          <h3 id="proc-log-h">Log</h3>
+          <pre id="proc-log" class="log" tabindex="0" aria-live="off"></pre>
+        </div>
+      </div>
+    </section>
+
     <!-- policy control -->
     <section class="card" id="policy-card" aria-labelledby="policy-h">
       <h2 id="policy-h">Policy</h2>

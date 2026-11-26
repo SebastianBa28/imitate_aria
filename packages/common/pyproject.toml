@@ -11,3 +11,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["imitate_common*"]
+
+[tool.setuptools.package-data]
+imitate_common = ["assets/*.urdf"]

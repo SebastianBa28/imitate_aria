@@ -11,6 +11,7 @@ Imitation learning from human demos recorded with Meta Project Aria Gen2 glasses
 3. **deploy** (`packages/deploy/`): ROS 2 nodes, policy runner, manual control and the dashboard server for the robot station; the dashboard page is in `packages/dashboard/web/`.
 
 `packages/common/imitate_common/` (numpy only, no ROS or torch) is shared by both sides: hand joint order/limits (`hand.py`), ROS topic/service names (`contract.py`), pose helpers (`transforms.py`, quaternions `(x, y, z, w)`, `T_a_b` maps b-frame points into frame a).
+- **Hand IK** (`orca_kinematics.py`, `hand_ik.py`): ORCA v2 right-hand FK from `assets/orcahand_v2_right.urdf` (kinematics-only copy of rwr_system's `src/viz/models/orcahand_v2/orcahand_v2.urdf.xacro`), and per-finger Levenberg-Marquardt IK from 5 fingertip targets in the palm frame (+z along fingers, +x index→pinky, +y out of the palm) to the 17 joints. `transforms.wrist_frame` builds the same axes from Aria landmarks 5/8/17. The ORCA `wrist` joint is held at 0 (the arm takes the wrist pose). Not wired into deploy yet; that the URDF's joint signs/zeros match orca_core's is unverified.
 
 The system was ported from rwr_system (ETH RWR course code), checked out at `~/rwr_humble_ws/src/rwr_system_imitate2`. Look there for how the hand and arm were driven before (e.g. `src/hand_control/hand_control_node.py`, `experiments/run_keyboard_teleop_franka.py`, `experiments/model_inference_node.py`).
 
@@ -25,6 +26,7 @@ The system was ported from rwr_system (ETH RWR course code), checked out at `~/r
 
 Data pipeline (repo root):
 ```bash
+uv run aria_doctor && uv run aria_gen2 auth pair                                    # once: pair the glasses (needs the Aria Companion App)
 uv run python packages/data/record_session.py --name demo23 --data-dir raw_data   # ENTER stops; saves raw_data/<name>_<mon><day>.vrs
 uv run python packages/data/post_process.py --vrs raw_data/demo23_nov24.vrs        # add --stop 60 for a quick test
 uv run python packages/data/log.py [--push] [--overwrite]                           # output/*/ -> datasets/imitate-aria (LeRobot)
@@ -39,6 +41,8 @@ pixi run -e hw real-arm              # real Franka + RealSense, simulated hand (
 pixi run -e hw real                  # real hand + RealSense + Franka (domain 7); the hand moves to neutral on startup
 pixi run -e hw spike-ping arm        # arm link check: expect "OK: ~30 Hz, frame 'world', position x y z"
 pixi run -e hw spike-realsense       # expect ~30 fps and USB 3.x
+pixi run spike-env                   # checks the pixi env imports (no hardware)
+pixi run station                     # dashboard alone (domain 0); start/stop the mock nodes from its Processes card
 pixi run -e hw spike-orca            # reads hand joints, moves nothing; needs config/orca/right/calibration.yaml
 pixi run -e hw ros2 launch launch/robot.launch.py profile:=real calibrate:=true   # recalibrate the hand (fingers sweep full range)
 ```
@@ -51,6 +55,7 @@ No linter or formatter is configured.
 
 The AINA recipe (arXiv 2511.16661): Grounding DINO box → SAM 2 mask on the **first sampled frame only** → sample `N_POINTS` per object inside each mask → CoTracker3 tracks them through the whole clip (no re-detection) → FoundationStereo on the rectified front SLAM pair gives depth → points are lifted to 3D and put in the world frame with the VIO glasses pose.
 
+- Because detection runs on the first frame only, recordings must start with every object in view: look down at them from 40–60 cm and hold still ~2 s before acting (README "Record"). By default the script skips ahead to the first frame where exposure has settled and a pose exists; `--start N` overrides that.
 - Objects to track and point counts are `PROMPTS` / `N_POINTS` at the top of `post_process.py` (same order = `obj_id`). Other tuning constants are next to them.
 - Output goes to `output/<recording>/`: `<stem>_aina.npz` plus `_rgb.mp4`, `_overlay.mp4`, `_depth.mp4`, `_seg.jpg`. Video frame t matches row t of every per-frame npz array. The module docstring documents every npz field; keep it in sync when changing outputs.
 - Conventions: missing data is **NaN, never zero**. "world" is the on-device VIO frame (gravity-aligned, Z up), consistent only within one `session_idx`.
@@ -58,7 +63,8 @@ The AINA recipe (arXiv 2511.16661): Grounding DINO box → SAM 2 mask on the **f
 
 ## Deploy architecture (`packages/deploy/`)
 
-- Each node is its own Python process (`python -m deploy.nodes.<x>`): `hand_node` (real ORCA via `deploy/hw/orca.py`, or a first-order-lag mock), `realsense_node`/`mock_camera`, `mock_arm` (mock profile only), `policy_node`, and the station server (`deploy.station.server`).
+- Each node is its own Python process (`python -m deploy.nodes.<x>`): `hand_node` (real ORCA via `deploy/hw/orca.py`, or a first-order-lag mock), `realsense_node`/`mock_camera`, `mock_arm` (mock profile only), `policy_node`, and the station server (`deploy.station.server`). Which nodes a profile runs, with which parameters, is defined once in `deploy/components.py` (ROS-free), used by both the launch file and the dashboard.
+- **Processes card (step 1 of "run everything from the dashboard")**: the station's `deploy/station/supervisor.py` (ROS-free, `tests/test_supervisor.py`) starts/stops/restarts the **mock profile's** nodes (`POST /api/process`, `{"name": arm|hand|camera|policy|all, "action": start|stop|restart}`; state + log lines in the WS ticks). Each child gets its own process group (stop = SIGINT → SIGTERM → SIGKILL, 5 s apart, like the launch file) and runs through `deploy/station/child.py`, which sets `PR_SET_PDEATHSIG` so nodes die even if the station is SIGKILLed; that is why all spawns go through one long-lived spawner thread (the kernel ties it to the spawning *thread*). Crashes are shown with exit code and never auto-restarted. Starts are refused on domain 7 and when the component's topic is already live (started elsewhere, e.g. `pixi run mock`: shown as "external"). Not done yet: real profile/domain switching (the bridge would need to restart on the new domain), a heartbeat so policy_node stops when the dashboard is gone, the Franka controller over SSH.
 - All topic names come from `imitate_common.contract`; all rates, limits, workspace and paths from `config/station.yaml` (loaded by `deploy/config.py`; override the whole file with `IMITATE_DEPLOY_CONFIG=/path.yaml`). Don't hardcode either in nodes.
 - Topics carry radians; `hand.py` tables are degrees with `*_RAD` arrays derived from them. Joint order is `hand.JOINT_NAMES` (17 joints, same as orca_core's `joint_ids`).
 - **`policy_node` is the only node that commands the robot.** Statuses `idle | running | homing | manual | fault`; commands on `/policy/command`: `start stop reset home manual live preview`.
@@ -69,8 +75,8 @@ The AINA recipe (arXiv 2511.16661): Grounding DINO box → SAM 2 mask on the **f
 - **Hand speed is not limited** (user's explicit choice: "this hand is pretty responsive and robust"): `hand.max_step_deg` and `manual.hand_max_step_deg` are `null` (= no limit, as in rwr_system; the motors run `current_based_position`, which limits force). Only the ROMs are enforced. In manual mode, hand targets are sent the moment they arrive (`policy_node.send_hand_now`), not on the 10 Hz tick. Setting a number brings a per-command cap back.
 - **Manual control** (`policy_node` status `manual`, dashboard card): hand sliders + arm jog (±x/y/z, 0.5–5 cm, Hold). Targets arrive as JSON on `/policy/manual` (via `POST /api/manual`), validated/clamped in the ROS-free `deploy/manual.py` (`tests/test_manual.py`). Targets start at the measured state (no jump on entering), the arm keeps its entry orientation, the arm moves at `manual.arm_max_step_m` (2 mm/tick = 2 cm/s), and manual refuses to start if the arm is outside `arm.workspace`.
 - **Policies**: subclass `deploy.policies.base.Policy` (`reset(obs)`, `act(obs) -> Action`; `needs_images = True` to get camera frames) and set `policy.plugin: module:Class` + `policy.checkpoint` in `station.yaml`. `DemoPolicy` is the default. A trained policy should run at the rate its data was recorded at (`policy.hz`, 10).
-- Station (`deploy/station/`): `server.py` is one process with a ROS bridge on a background thread (`bridge.py`) and a FastAPI app: `GET /api/config`, `POST /api/command`, `POST /api/manual`, WebSocket `/ws` (JSON snapshot/ticks + binary JPEG frames, first byte = channel 0 colour / 1 depth). `buffers.py` and `monitor.py` are ROS-free, which is why `tests/test_station_core.py` runs without ROS; keep logic testable that way. The bridge logs refused policy commands (`"<cmd>: <reason>"`) as warnings.
-- Dashboard (`packages/dashboard/web/`): static ES-module page served as-is by `server.py` (no build step, no external libraries, must work offline at the robot). `app.js` holds the series store, WebSocket client and panels (policy, camera, topic health, manual control, hand joints, arm top/side view, history plots, metrics, events); `chart.js` is the canvas time-series chart. It reads everything from `/api/config` and the WS payloads, so new series or metrics appear without frontend changes (`METRIC_NAMES` gives nicer titles). Esc = E-stop (`all/estop`: stop policy + hand e-stop, which disconnects the hand until hand_node restarts). No login: keep `station.host: 127.0.0.1`.
+- Station (`deploy/station/`): `server.py` is one process with a ROS bridge on a background thread (`bridge.py`) and a FastAPI app: `GET /api/config`, `POST /api/command`, `POST /api/manual`, `POST /api/process`, `GET /api/processes`, WebSocket `/ws` (JSON snapshot/ticks + binary JPEG frames, first byte = channel 0 colour / 1 depth). `buffers.py` and `monitor.py` are ROS-free, which is why `tests/test_station_core.py` runs without ROS; keep logic testable that way. The bridge logs refused policy commands (`"<cmd>: <reason>"`) as warnings.
+- Dashboard (`packages/dashboard/web/`): static ES-module page served as-is by `server.py` (no build step, no external libraries, must work offline at the robot). `app.js` holds the series store, WebSocket client and panels (processes, policy, camera, topic health, manual control, hand joints, arm top/side view, history plots, metrics, events); `chart.js` is the canvas time-series chart. It reads everything from `/api/config` and the WS payloads, so new series or metrics appear without frontend changes (`METRIC_NAMES` gives nicer titles). Esc = E-stop (`all/estop`: stop policy + hand e-stop, which disconnects the hand until hand_node restarts). No login: keep `station.host: 127.0.0.1`.
 
 ## ROS networking (hard-won, keep)
 
@@ -87,7 +93,9 @@ The AINA recipe (arXiv 2511.16661): Grounding DINO box → SAM 2 mask on the **f
 ## Testing without disturbing a running station
 
 - The user often runs a station on port 8000 themselves: test on an isolated copy instead, e.g. `IMITATE_DEPLOY_CONFIG=<copy of station.yaml with station.port 8001>` and `pixi run mock` (domain 0), or another `ROS_DOMAIN_ID`. Never kill processes you didn't start.
-- Start test stations in their own process group (`setsid ...`, save the PGID) and stop them with `kill -INT -- -<pgid>`: signalling only `pixi` leaves the ros2 launch children running and holding port 8000.
+- Children started from a test station's Processes card stop with the station; check with `ps` afterwards that no `deploy.nodes` process is left.
+- `ros2` puts its env's `bin/` first on `sys.path`; an env with PySide6 has an unrelated `bin/deploy.py` that shadows our package (hence the `sys.path.insert` in `robot.launch.py`).
+- Start test stations in their own process group (`setsid bash -c 'echo $$ > pgid; exec <cmd>' &`; `$!` after `setsid <cmd> &` is not the PGID because setsid may fork) and stop them with `kill -INT -- -<pgid>`: signalling only `pixi` leaves the ros2 launch children running and holding port 8000.
 - `pkill -f`/`pgrep -f` patterns like `deploy.nodes.mock_arm` also match your own shell's command line and kill it; anchor them to the interpreter path (`^/home/.../packages/deploy/.pixi/envs/<env>/bin/python`).
 - `ros2 topic pub/echo` under pixi take several seconds to start; wait ≥ 6 s before asserting on them. `ros2 topic echo` truncates strings unless `--full-length`.
 - Dashboard UI checks: headless Chrome via CDP (`google-chrome --headless=new --remote-debugging-port=...`, driven from the pixi Python's `websockets`), screenshots + `Runtime.evaluate`; override `window.confirm` for Live/manual dialogs.
@@ -97,11 +105,11 @@ The AINA recipe (arXiv 2511.16661): Grounding DINO box → SAM 2 mask on the **f
 - **Torque handling (ported from rwr_system, recommended)**: on these Feetech motors any position command re-enables torque. rwr's hand node drops commands while torque is off and sets the goal to the current pose before re-enabling (`hold_current_pose`). Ours does neither, so after "Torque off" a slider move or policy re-enables the hand, and "Torque on" can snap it.
 - hand_node should detect a lost hand connection (all motors unavailable) and report it clearly instead of repeating driver warnings.
 - Optional hand smoothing: interpolate to the latest target at a fixed motor rate (e.g. 50 Hz) independent of `policy.hz`; express remaining speed limits per second instead of per tick.
-- Dashboard ideas discussed: start/stop the Franka controller over SSH (`docker start multipanda-container && docker exec -d ... ros2 launch franka_bringup ...`, SSH key auth, robot IP in `station.yaml`, check `docker ps` first since the NUC is shared), a robot setup checklist panel (NUC reachable, container running, FCI/brakes from `/paco/franka_robot_state_broadcaster/robot_state`, arm pose frame/rate, hand calibrated, camera USB 3), "Restart hand" (respawn hand_node only) and "Recover arm" buttons, start-on-boot for the station. Keep unlocking brakes a deliberate human action.
+- Dashboard ideas discussed: start/stop the Franka controller over SSH (`docker start multipanda-container && docker exec -d ... ros2 launch franka_bringup ...`, SSH key auth, robot IP in `station.yaml`, check `docker ps` first since the NUC is shared), a robot setup checklist panel (NUC reachable, container running, FCI/brakes from `/paco/franka_robot_state_broadcaster/robot_state`, arm pose frame/rate, hand calibrated, camera USB 3), "Recover arm" button, start-on-boot for the station. Keep unlocking brakes a deliberate human action.
 - No 3D robot view on the dashboard (needs ORCA/Franka model files in `packages/deploy/assets/robot`).
 
 ## Repo notes
 
 - Large artifacts are gitignored: `*.vrs`, `output/`, `*.npz`, `*.mp4`, model weights (`*.pt`, `*.pth`), `third_party/`, `datasets/`, `.pixi/`, `*.egg-info/`, `config/orca/*/calibration.yaml`.
+- `packages/data/visualize_hand_trajectories.py` is from an older pipeline: it reads `*_hands.npz`/`*_objects.npz`/`*_table.npz` (from a removed `extract_hand_trajectories.py`, AprilTag table frame), not the current `_aina.npz`.
 - First post-process run downloads SAM 2.1-L (`sam2.1_l.pt`, into the current directory), Grounding DINO (HF cache) and CoTracker3 (torch hub cache).
-- `packages/deploy/control.py` (empty) shows as deleted in the working tree; not deleted by Claude.

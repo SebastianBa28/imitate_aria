@@ -7,11 +7,19 @@ API
   POST /api/command    {"target": "policy", "cmd": start|stop|reset|home|live|preview}
                        {"target": "hand", "cmd": estop|torque_on|torque_off}
                        {"target": "all", "cmd": "estop"}   policy stop + hand e-stop
+  POST /api/manual     manual targets while the policy node is in "manual" (deploy/manual.py)
+  POST /api/process    {"name": arm|hand|camera|policy|all, "action": start|stop|restart}
+  GET  /api/processes  state of the processes the dashboard can start (deploy/station/supervisor.py)
   WS   /ws             text JSON: {"type": "snapshot"|"tick", ...}; binary: 1 byte channel (0 colour,
                        1 depth) + JPEG
+
+Processes: the station starts and stops the mock profile's nodes itself (deploy.components). They stop
+with the station. A node whose topic is already live (e.g. started by `pixi run mock`) shows as
+"external" and is not started twice.
 """
 import asyncio
 import contextlib
+import os
 import threading
 import time
 from pathlib import Path
@@ -22,13 +30,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 
 from deploy import config as cfg
+from deploy.components import LIVE_AGE_S, components, domain_refusal, is_live
 from deploy.station.bridge import EventLog, StationBridge
 from deploy.station.buffers import SeriesStore
 from deploy.station.camera import DEPTH_RANGE_MM, CameraEncoder
 from deploy.station.monitor import HealthBoard
+from deploy.station.supervisor import Spec, Supervisor
 from imitate_common import hand
 
 CONF = cfg.load()
@@ -37,6 +47,10 @@ WEB_DIR = cfg.DEPLOY_ROOT.parent / "dashboard" / "web"   # static page, no build
 ROBOT_ASSETS = cfg.DEPLOY_ROOT / "assets" / "robot"
 CHANNELS = {"color": 0, "depth": 1}
 SNAPSHOT_POINTS, TICK_POINTS = 1500, 60
+PROFILE = "mock"          # processes the dashboard can start; the real profile is a later step
+DOMAIN = os.environ.get("ROS_DOMAIN_ID", "0")
+COMPONENTS = {c.name: c for c in components(PROFILE)}
+LOG_SNAPSHOT_LINES, LOG_TICK_LINES = 300, 200
 
 
 class State:
@@ -46,9 +60,46 @@ class State:
     bridge = None
     camera = None
     executor = None
+    supervisor = None
 
 
 S = State()
+
+
+def process_guard(name):
+    """Why the dashboard must not start this process now, or None."""
+    refusal = domain_refusal(PROFILE, DOMAIN)
+    if refusal:
+        return refusal
+    c = COMPONENTS[name]
+    if is_live(S.health.snapshot().get(c.topic)) and not recently_ours(name):
+        return f"{c.topic} is already published: {c.label} runs outside the dashboard (stop it there first)"
+    return None
+
+
+def recently_ours(name):
+    """Our own process ended so recently that its last messages still make its topic look live."""
+    ended = S.supervisor.procs[name].ended_at
+    return ended is not None and time.time() - ended < LIVE_AGE_S + 0.5
+
+
+def process_status():
+    health = S.health.snapshot()
+    out = S.supervisor.status()
+    for p in out:
+        c = COMPONENTS[p["name"]]
+        ours = p["state"] in ("running", "stopping") or recently_ours(p["name"])
+        p["external"] = not ours and is_live(health.get(c.topic))
+        p["topic"] = c.topic
+    return out
+
+
+def start_supervisor():
+    for c in COMPONENTS.values():
+        S.health.watch(c.topic)   # the guard needs them even if station.yaml doesn't list them
+    specs = {c.name: Spec(c.argv(), title=c.title, cwd=str(cfg.DEPLOY_ROOT)) for c in COMPONENTS.values()}
+    S.supervisor = Supervisor(specs, guard=process_guard,
+                              on_event=lambda level, text: S.events.add(level, "processes", text))
 
 
 def start_ros():
@@ -59,8 +110,15 @@ def start_ros():
     # (measured 1-8 Hz vs 30 Hz). Service calls block in worker threads, not in this executor.
     S.executor = SingleThreadedExecutor()
     S.executor.add_node(S.bridge)
-    threading.Thread(target=S.executor.spin, daemon=True).start()
+    threading.Thread(target=spin, daemon=True).start()
     S.events.add("info", "station", "station started")
+
+
+def spin():
+    try:
+        S.executor.spin()
+    except ExternalShutdownException:
+        pass   # Ctrl-C: rclpy's own signal handler shut ROS down; the lifespan exit does the rest
 
 
 def stop_ros():
@@ -74,7 +132,10 @@ def stop_ros():
 @contextlib.asynccontextmanager
 async def lifespan(app):
     start_ros()
+    start_supervisor()
     yield
+    ok, msg = await asyncio.get_running_loop().run_in_executor(None, S.supervisor.shutdown)
+    print(f"station: {msg}", flush=True)
     stop_ros()
 
 
@@ -99,6 +160,9 @@ def get_config():
         "camera": {"width": CONF["camera"]["width"], "height": CONF["camera"]["height"], "fps": CONF["camera"]["fps"],
                    "stream_hz": SC["camera_hz"], "depth_range_mm": list(DEPTH_RANGE_MM)},
         "robot_assets": ROBOT_ASSETS.exists(),
+        "processes": {"profile": PROFILE, "domain": DOMAIN, "refusal": domain_refusal(PROFILE, DOMAIN),
+                      "components": [{"name": c.name, "title": c.title, "label": c.label, "topic": c.topic}
+                                     for c in COMPONENTS.values()]},
     }
 
 
@@ -130,6 +194,35 @@ async def command(c: Command):
     return {"ok": ok, "message": msg}
 
 
+class ProcessCommand(BaseModel):
+    name: str
+    action: str
+
+
+@app.get("/api/processes")
+def get_processes():
+    return process_status()
+
+
+@app.post("/api/process")
+async def process_command(c: ProcessCommand):
+    sv = S.supervisor
+    if c.name == "all":
+        fn = {"start": sv.start_all, "stop": sv.stop_all}.get(c.action)
+    else:
+        fn = {"start": sv.start, "stop": sv.stop, "restart": sv.restart}.get(c.action)
+        fn = fn and (lambda f=fn: f(c.name))
+    if fn is None:
+        return JSONResponse({"ok": False, "message": f"unknown action {c.name}/{c.action}"}, status_code=400)
+    try:
+        ok, msg = await asyncio.get_running_loop().run_in_executor(None, fn)   # stop can take up to 10 s
+    except ValueError as e:
+        return JSONResponse({"ok": False, "message": str(e)}, status_code=400)
+    if not ok:
+        S.events.add("warn", "dashboard", f"{c.action} {c.name}: {msg}")
+    return {"ok": ok, "message": msg}
+
+
 @app.post("/api/manual")
 def manual(targets: dict):
     """Manual targets while the policy node is in "manual" (format: deploy/manual.py). Not logged per call."""
@@ -141,12 +234,14 @@ def manual(targets: dict):
 async def ws(socket: WebSocket):
     await socket.accept()
     loop = asyncio.get_running_loop()
-    cursors, last_event = {}, -1
+    cursors, log_cursors, last_event = {}, {}, -1
     sent_seq = {ch: None for ch in CHANNELS}
     period, cam_period = 1.0 / SC["stream_hz"], 1.0 / SC["camera_hz"]
     try:
         await socket.send_json({"type": "snapshot", "series_meta": S.store.describe(),
-                                "series": S.store.since(cursors, SNAPSHOT_POINTS)})
+                                "series": S.store.since(cursors, SNAPSHOT_POINTS),
+                                "processes": process_status(),
+                                "logs": S.supervisor.logs_since(log_cursors, LOG_SNAPSHOT_LINES)})
         next_cam = 0.0
         while True:
             t0 = time.monotonic()
@@ -160,6 +255,8 @@ async def ws(socket: WebSocket):
                 "health": S.health.snapshot(),
                 "policy": S.bridge.policy_state,
                 "events": events,
+                "processes": process_status(),
+                "logs": S.supervisor.logs_since(log_cursors, LOG_TICK_LINES),
             })
             if t0 >= next_cam:
                 next_cam = t0 + cam_period

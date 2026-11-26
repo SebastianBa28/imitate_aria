@@ -1,0 +1,211 @@
+<?xml version="1.0" ?>
+<!-- ORCA v2 right hand, kinematics only (no meshes/inertia).
+     Generated from rwr_system src/viz/models/orcahand_v2/orcahand_v2.urdf.xacro. -->
+<robot name="orcahand_v2">
+	<link name="hand_root"/>
+	<joint name="hand_root_fixed" type="fixed">
+		<parent link="hand_root"/>
+		<child link="forearm"/>
+		<!-- stand the hand upright, fingers along +z, as in orcahand_v1b -->
+		<origin xyz="0 0 0" rpy="1.5707963267948966 0 0"/>
+	</joint>
+	<!-- centre of the forearm's flat bottom face, same orientation as hand_root -->
+	<link name="mount"/>
+	<joint name="mount_fixed" type="fixed">
+		<parent link="hand_root"/>
+		<child link="mount"/>
+		<origin xyz="-0.01 0 -0.058" rpy="0 0 0"/>
+	</joint>
+	<link name="forearm">
+	</link>
+	<link name="tower">
+	</link>
+	<joint type="fixed" name="tower_fixed">
+		<parent link="forearm"/>
+		<child link="tower"/>
+		<origin xyz="-0.010000000000000018 0.05230000000000584 -2.0816681711721685e-17" rpy="-1.5707963267948966 1.570796326794894 0.0"/>
+	</joint>
+	<link name="palm">
+	</link>
+	<joint type="revolute" name="wrist">
+		<parent link="tower"/>
+		<child link="palm"/>
+		<origin xyz="5.551115123125783e-17 2.3418766925686896e-17 0.04000000000000006" rpy="0.0 0.0 -1.5707963267948992"/>
+		<axis xyz="-0.9999999999999963 -1.1270242357758872e-16 5.94450127715256e-17"/>
+		<limit lower="-1.1344640137963142" upper="0.6108652381980153" effort="100" velocity="100"/>
+	</joint>
+	<link name="pinky_ap">
+	</link>
+	<joint type="revolute" name="pinky_abd">
+		<parent link="palm"/>
+		<child link="pinky_ap"/>
+		<origin xyz="0.035641716045904354 0.0006891586859576128 0.06205424192069395" rpy="-1.529473573814961 1.2028622114983025 -2.9119895363116646"/>
+		<axis xyz="9.71445146547012e-16 1.6653345369377348e-16 0.9999999999999984"/>
+		<limit lower="-0.5235987755982988" upper="0.5235987755982988" effort="100" velocity="100"/>
+	</joint>
+	<link name="pinky_pp">
+	</link>
+	<joint type="revolute" name="pinky_mcp">
+		<parent link="pinky_ap"/>
+		<child link="pinky_pp"/>
+		<origin xyz="-0.017750000000000075 -4.698582746252626e-17 -0.0010000000000000768" rpy="0.0 -1.5707963267948908 0.0"/>
+		<axis xyz="6.439293542825908e-15 -1.0000000000000049 6.661338147750939e-16"/>
+		<limit lower="-0.4363323129985824" upper="1.7453292519943295" effort="100" velocity="100"/>
+	</joint>
+	<link name="pinky_fingertip_assembly">
+	</link>
+	<joint type="revolute" name="pinky_pip">
+		<parent link="pinky_pp"/>
+		<child link="pinky_fingertip_assembly"/>
+		<origin xyz="0.000999999999999998 3.208202345938654e-17 0.030999999999999632" rpy="1.1102230246251565e-16 0.0 6.217248937900863e-15"/>
+		<axis xyz="-2.609024107869118e-15 -0.9999999999999968 3.885780586188048e-16"/>
+		<limit lower="-0.2617993877991494" upper="1.8675022996339325" effort="100" velocity="100"/>
+	</joint>
+	<link name="ring_ap">
+	</link>
+	<joint type="revolute" name="ring_abd">
+		<parent link="palm"/>
+		<child link="ring_ap"/>
+		<origin xyz="0.015307722147416544 -0.003218364665125601 0.07130479703009855" rpy="-1.5707963267948946 1.4250613342533707 -3.054326190990075"/>
+		<axis xyz="8.881784197001252e-16 -5.551115123125783e-17 0.9999999999999994"/>
+		<limit lower="-0.47123889803846897" upper="0.47123889803846897" effort="100" velocity="100"/>
+	</joint>
+	<link name="ring_pp">
+	</link>
+	<joint type="revolute" name="ring_mcp">
+		<parent link="ring_ap"/>
+		<child link="ring_pp"/>
+		<origin xyz="-0.01986696794290542 3.8657355141463114e-17 -0.00099999999999545" rpy="0.0 -1.5707963267948908 0.0"/>
+		<axis xyz="5.9396931817445875e-15 -1.0000000000000042 1.1102230246251565e-16"/>
+		<limit lower="-0.4363323129985824" upper="1.7453292519943295" effort="100" velocity="100"/>
+	</joint>
+	<link name="ring_fingertip_assembly">
+	</link>
+	<joint type="revolute" name="ring_pip">
+		<parent link="ring_pp"/>
+		<child link="ring_fingertip_assembly"/>
+		<origin xyz="0.0019999999999998678 1.5882195667426256e-18 0.040000000000000126" rpy="2.2204460492503052e-16 0.0 6.217248937900862e-15"/>
+		<axis xyz="-2.942091015256665e-15 -0.999999999999996 2.220446049250313e-16"/>
+		<limit lower="-0.2617993877991494" upper="1.8675022996339325" effort="100" velocity="100"/>
+	</joint>
+	<link name="middle_ap">
+	</link>
+	<joint type="revolute" name="middle_abd">
+		<parent link="palm"/>
+		<child link="middle_ap"/>
+		<origin xyz="-0.005706333727246699 -0.004023404072025678 0.07850189342716887" rpy="1.5707963267946425 1.5681783329169052 -2.544631172440859e-13"/>
+		<axis xyz="1.1102230246251565e-15 -2.220446049250313e-16 0.9999999999999971"/>
+		<limit lower="-0.47123889803846897" upper="0.47123889803846897" effort="100" velocity="100"/>
+	</joint>
+	<link name="middle_pp">
+	</link>
+	<joint type="revolute" name="middle_mcp">
+		<parent link="middle_ap"/>
+		<child link="middle_pp"/>
+		<origin xyz="-0.019866967942905277 -1.8423293703642938e-17 -0.0009999999999957202" rpy="0.0 -1.5707963267948903 0.0"/>
+		<axis xyz="6.050715484207103e-15 -1.0000000000000058 -1.1102230246251565e-16"/>
+		<limit lower="-0.4363323129985824" upper="1.7453292519943295" effort="100" velocity="100"/>
+	</joint>
+	<link name="middle_fingertip_assembly">
+	</link>
+	<joint type="revolute" name="middle_pip">
+		<parent link="middle_pp"/>
+		<child link="middle_fingertip_assembly"/>
+		<origin xyz="0.0020000000000000313 -5.598548939047626e-18 0.0400000000000001" rpy="5.551115123125779e-16 4.440892098500626e-16 6.550315845288408e-15"/>
+		<axis xyz="-3.2751579226442118e-15 -0.9999999999999977 4.440892098500626e-16"/>
+		<limit lower="-0.2617993877991494" upper="1.8675022996339325" effort="100" velocity="100"/>
+	</joint>
+	<link name="index_ap">
+	</link>
+	<joint type="revolute" name="index_abd">
+		<parent link="palm"/>
+		<child link="index_ap"/>
+		<origin xyz="-0.027240979039914386 -0.002206966804174762 0.06940680269673646" rpy="1.6538568135338134 1.3873496487488786 -0.0042742186040372054"/>
+		<axis xyz="-8.326672684688674e-17 3.3306690738754696e-16 0.9999999999999991"/>
+		<limit lower="-0.4363323129985824" upper="0.5235987755982988" effort="100" velocity="100"/>
+	</joint>
+	<link name="index_pp">
+	</link>
+	<joint type="revolute" name="index_mcp">
+		<parent link="index_ap"/>
+		<child link="index_pp"/>
+		<origin xyz="-0.01915096815087666 -4.499288227880137e-18 -0.0009999999999971549" rpy="-2.9439233600320843e-16 -1.570796326794891 0.0"/>
+		<axis xyz="5.828670879282072e-15 -1.0000000000000036 1.1102230246251565e-16"/>
+		<limit lower="-0.4363323129985824" upper="1.7453292519943295" effort="100" velocity="100"/>
+	</joint>
+	<link name="index_fingertip_assembly">
+	</link>
+	<joint type="revolute" name="index_pip">
+		<parent link="index_pp"/>
+		<child link="index_fingertip_assembly"/>
+		<origin xyz="0.0015000000000000417 -7.819255613844171e-18 0.037000000000000026" rpy="3.3306690738754617e-16 0.0 6.77236045021344e-15"/>
+		<axis xyz="-3.608224830031759e-15 -0.999999999999996 2.7755575615628914e-16"/>
+		<limit lower="-0.2617993877991494" upper="1.8675022996339325" effort="100" velocity="100"/>
+	</joint>
+	<link name="thumb_tp">
+	</link>
+	<joint type="revolute" name="thumb_cmc">
+		<parent link="palm"/>
+		<child link="thumb_tp"/>
+		<origin xyz="-0.028398719136200776 0.010997180928709077 0.03058953349163134" rpy="0.6614951404674763 0.3860568562160207 -1.4328677049607634"/>
+		<axis xyz="-7.771561172376096e-16 5.412337245047638e-16 -0.9999999999999931"/>
+		<limit lower="-0.7853981633974483" upper="0.5759586531581288" effort="100" velocity="100"/>
+	</joint>
+	<link name="thumb_ap">
+	</link>
+	<joint type="revolute" name="thumb_abd">
+		<parent link="thumb_tp"/>
+		<child link="thumb_ap"/>
+		<origin xyz="-0.007999999999728488 -1.8648424965940806e-17 -0.003850000000000026" rpy="-1.221730476396032 -1.9984014443252818e-15 -2.3314683517128287e-15"/>
+		<axis xyz="-1.4988010832439613e-15 0.3420201433256641 0.9396926207859044"/>
+		<limit lower="-0.3141592653589793" upper="0.9599310885968813" effort="100" velocity="100"/>
+	</joint>
+	<link name="thumb_pp">
+	</link>
+	<joint type="revolute" name="thumb_mcp">
+		<parent link="thumb_ap"/>
+		<child link="thumb_pp"/>
+		<origin xyz="-0.027999999999999976 4.673366946417151e-18 1.305542026140606e-16" rpy="-3.1415926535897927 1.5707963267948921 0.0"/>
+		<axis xyz="-3.1363800445660672e-15 -1.0000000000000027 2.942091015256665e-15"/>
+		<limit lower="-0.4363323129985824" upper="1.7453292519943295" effort="100" velocity="100"/>
+	</joint>
+	<link name="thumb_dp">
+	</link>
+	<joint type="revolute" name="thumb_dip">
+		<parent link="thumb_pp"/>
+		<child link="thumb_dp"/>
+		<origin xyz="0.0009999999999999985 1.1880660448999647e-16 0.03200000000000021" rpy="0.0 0.0 -3.830269434956779e-15"/>
+		<axis xyz="4.718447854656915e-16 -0.9999999999999946 3.164135620181696e-15"/>
+		<limit lower="-0.2617993877991494" upper="1.8675022996339325" effort="100" velocity="100"/>
+	</joint>
+	<link name="thumb_fingertip"/>
+	<joint type="fixed" name="thumb_fingertip_fixed">
+		<parent link="thumb_dp"/>
+		<child link="thumb_fingertip"/>
+		<origin xyz="0.001017 0.0 0.03" rpy="0 0 0"/>
+	</joint>
+	<link name="index_fingertip"/>
+	<joint type="fixed" name="index_fingertip_fixed">
+		<parent link="index_fingertip_assembly"/>
+		<child link="index_fingertip"/>
+		<origin xyz="-0.001718 0.0 0.0444" rpy="0 0 0"/>
+	</joint>
+	<link name="middle_fingertip"/>
+	<joint type="fixed" name="middle_fingertip_fixed">
+		<parent link="middle_fingertip_assembly"/>
+		<child link="middle_fingertip"/>
+		<origin xyz="-0.001718 0.0 0.0444" rpy="0 0 0"/>
+	</joint>
+	<link name="ring_fingertip"/>
+	<joint type="fixed" name="ring_fingertip_fixed">
+		<parent link="ring_fingertip_assembly"/>
+		<child link="ring_fingertip"/>
+		<origin xyz="-0.001718 0.0 0.0444" rpy="0 0 0"/>
+	</joint>
+	<link name="pinky_fingertip"/>
+	<joint type="fixed" name="pinky_fingertip_fixed">
+		<parent link="pinky_fingertip_assembly"/>
+		<child link="pinky_fingertip"/>
+		<origin xyz="-0.002225 0.0 0.0374" rpy="0 0 0"/>
+	</joint>
+</robot>

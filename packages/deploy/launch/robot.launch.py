@@ -14,40 +14,27 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 
 DEPLOY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ROBOT_DOMAIN_ID = "7"  # multipanda_ros2's `run` script on the NUC
+# ros2 puts its bin/ dir first on sys.path; some envs have an unrelated bin/deploy.py (PySide6's tool)
+sys.path.insert(0, DEPLOY_ROOT)
+from deploy.components import components, domain_refusal  # noqa: E402
 
 
-def node(module, *ros_params):
-    cmd = [sys.executable, "-m", module]
-    if ros_params:
-        cmd += ["--ros-args"] + [x for p in ros_params for x in ("-p", p)]
-    return ExecuteProcess(cmd=cmd, cwd=DEPLOY_ROOT, output="screen", name=module.rsplit(".", 1)[-1],
+def process(cmd, name):
+    return ExecuteProcess(cmd=cmd, cwd=DEPLOY_ROOT, output="screen", name=name,
                           sigterm_timeout="5", sigkill_timeout="5")
 
 
 def setup(context):
     get = lambda name: context.launch_configurations[name].lower()  # noqa: E731
     profile = get("profile")
-    if profile not in ("mock", "real"):
-        raise RuntimeError(f"profile must be mock or real, got {profile!r}")
-    mock = profile == "mock"
-    domain = os.environ.get("ROS_DOMAIN_ID", "0")
-    if mock and domain == ROBOT_DOMAIN_ID:
-        raise RuntimeError(f"profile:=mock on ROS_DOMAIN_ID={domain}, the real robot's domain: the simulated "
-                           "nodes would talk to the real arm. Use `pixi run mock` (domain 0).")
-    pick = lambda name: (get(name) or profile) == "mock"  # noqa: E731
-    for name in ("hand", "camera"):
-        if get(name) not in ("", "mock", "real"):
-            raise RuntimeError(f"{name} must be mock or real, got {get(name)!r}")
-    nodes = [node("deploy.nodes.hand_node", f"mock:={str(pick('hand')).lower()}", f"calibrate:={get('calibrate')}")]
-    nodes.append(node("deploy.nodes.mock_camera" if pick("camera") else "deploy.nodes.realsense_node"))
-    if mock:
-        nodes.append(node("deploy.nodes.mock_arm"))
-    if get("policy") == "true":
-        nodes.append(node("deploy.nodes.policy_node"))
+    refusal = domain_refusal(profile, os.environ.get("ROS_DOMAIN_ID", "0"))
+    if refusal:
+        raise RuntimeError(refusal)
+    comps = components(profile, hand=get("hand"), camera=get("camera"),   # raises on bad values
+                       calibrate=get("calibrate") == "true", policy=get("policy") == "true")
+    nodes = [process(c.argv(), c.label) for c in comps]
     if get("station") == "true":
-        nodes.append(ExecuteProcess(cmd=[sys.executable, "-m", "deploy.station.server"], cwd=DEPLOY_ROOT,
-                                    output="screen", name="station"))
+        nodes.append(process([sys.executable, "-m", "deploy.station.server"], "station"))
     return nodes
 
 

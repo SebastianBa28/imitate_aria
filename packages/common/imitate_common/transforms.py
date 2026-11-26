@@ -52,3 +52,30 @@ def step_pose(pos, quat, pos_target, quat_target, max_dist, max_angle):
     angle = quat_angle(quat, quat_target)
     new_quat = quat_target if angle <= max_angle else slerp(quat, quat_target, max_angle / angle)
     return np.asarray(new_pos, dtype=np.float64), quat_normalize(new_quat)
+
+
+def wrist_frame(wrist, index_mcp, pinky_mcp):
+    """T_ref_wrist (4x4) from three hand keypoints given in any frame `ref` (Aria landmarks 5, 8, 17).
+
+    Origin at the wrist; +z towards the knuckles (the midpoint of index and pinky MCP), +x from index to
+    pinky (made perpendicular to z), +y = z cross x, which points out of the palm for a right hand.
+    These are the axes of the ORCA palm frame (orca_kinematics), so the two differ by a small, roughly
+    constant offset. Raises ValueError for NaN or degenerate (collinear) points.
+    """
+    w, i, p = (np.asarray(v, dtype=np.float64) for v in (wrist, index_mcp, pinky_mcp))
+    if not np.all(np.isfinite([w, i, p])):
+        raise ValueError("wrist_frame: NaN keypoint")
+    z = (i + p) / 2 - w
+    nz = np.linalg.norm(z)
+    if nz < 1e-6:
+        raise ValueError("wrist_frame: degenerate keypoints")
+    z = z / nz
+    x = (p - i) - np.dot(p - i, z) * z
+    nx = np.linalg.norm(x)
+    if nx < 1e-6:
+        raise ValueError("wrist_frame: degenerate keypoints")
+    x = x / nx
+    T = np.eye(4)
+    T[:3, :3] = np.stack([x, np.cross(z, x), z], axis=1)
+    T[:3, 3] = w
+    return T

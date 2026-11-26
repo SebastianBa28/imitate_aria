@@ -1,5 +1,5 @@
 // Station dashboard. Talks to deploy.station.server:
-//   GET /api/config, POST /api/command, WS /ws (JSON snapshot/tick + binary JPEG: 1 byte channel, then the image)
+//   GET /api/config, POST /api/command, POST /api/process, WS /ws (JSON snapshot/tick + binary JPEG: 1 byte channel, then the image)
 import { TimeChart, cssColor, fmt } from "./chart.js";
 
 const $ = (id) => document.getElementById(id);
@@ -34,7 +34,13 @@ const state = {
   cam: { view: "color", frames: { color: [], depth: [] }, urls: {} },
   charts: { metrics: new Map() },
   events: [],
+  procs: [],                 // supervisor status rows (see deploy/station/supervisor.py)
+  logs: new Map(),           // process name -> [[id, t, text], ...]
+  logSel: null,
+  logDirty: true,
+  procPending: new Set(),    // process names (or "all") with a request in flight
 };
+const LOG_KEEP = 500;
 
 const serverNow = () => Date.now() / 1000 + state.clockOffset;
 
@@ -302,6 +308,149 @@ function renderManual() {
     dist < 0.002 ? "Arm is at the target." :
     p.mode === "live" ? `Arm is ${(dist * 100).toFixed(1)} cm from the target and moving.` :
     `Target is ${(dist * 100).toFixed(1)} cm from the arm (preview: the arm does not follow).`;
+}
+
+// --- processes ------------------------------------------------------------------------------
+const POLICY_ACTIVE = ["running", "manual", "homing"];
+
+async function sendProcess(name, action) {
+  const out = $("proc-result");
+  const touchesPolicy = name === "policy" || name === "all";
+  if (action !== "start" && touchesPolicy && POLICY_ACTIVE.includes(state.policy.status) &&
+      !confirm(`The policy is ${state.policy.status}. Stopping policy_node ends it abruptly. Continue?`)) return;
+  state.procPending.add(name);
+  out.dataset.ok = "true";
+  out.textContent = `${action} ${name}…`;
+  try {
+    const res = await fetch("/api/process", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, action }),
+    });
+    const body = await res.json().catch(() => ({ ok: false, message: `HTTP ${res.status}` }));
+    out.dataset.ok = String(!!body.ok);
+    out.textContent = body.message;
+  } catch (e) {
+    out.dataset.ok = "false";
+    out.textContent = `${action} ${name}: station unreachable (${e.message})`;
+  } finally {
+    state.procPending.delete(name);
+  }
+}
+
+function selectLog(name) {
+  state.logSel = name;
+  state.logDirty = true;
+  for (const [n, el] of Object.entries(state.procEls)) el.row.setAttribute("aria-selected", String(n === name));
+}
+
+function buildProcesses() {
+  const pc = state.config.processes;
+  $("proc-profile").textContent = `(${pc.profile} profile, ROS domain ${pc.domain})`;
+  $("proc-refusal").hidden = !pc.refusal;
+  $("proc-refusal").textContent = pc.refusal || "";
+  state.procEls = {};
+  const rows = pc.components.map((c) => {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    name.innerHTML = `<span class="pname"></span><span class="plabel"></span>`;
+    name.querySelector(".pname").textContent = c.title;
+    name.querySelector(".plabel").textContent = c.label;
+    const st = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "status";
+    st.appendChild(badge);
+    const detail = document.createElement("td");
+    detail.className = "detail";
+    const act = document.createElement("td");
+    const box = document.createElement("div");
+    box.className = "actions";
+    const buttons = {};
+    for (const a of ["start", "stop", "restart"]) {
+      const b = document.createElement("button");
+      b.className = "small";
+      b.textContent = a[0].toUpperCase() + a.slice(1);
+      b.addEventListener("click", (e) => { e.stopPropagation(); sendProcess(c.name, a); });
+      box.appendChild(b);
+      buttons[a] = b;
+    }
+    act.appendChild(box);
+    row.append(name, st, detail, act);
+    row.addEventListener("click", () => selectLog(c.name));
+    state.procEls[c.name] = { row, badge, detail, buttons };
+    return row;
+  });
+  $("proc-body").replaceChildren(...rows);
+  $("proc-start-all").addEventListener("click", () => sendProcess("all", "start"));
+  $("proc-stop-all").addEventListener("click", () => sendProcess("all", "stop"));
+  if (pc.components.length) selectLog(pc.components[0].name);
+}
+
+function duration(s) {
+  if (s < 60) return `${Math.floor(s)} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${Math.floor(s % 60)} s`;
+  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
+}
+const clock = (t) => new Date((t - state.clockOffset) * 1000).toLocaleTimeString([], { hour12: false });
+
+function procView(p) {
+  if (!state.connected || !p) return { s: "unknown", label: "unknown", detail: "" };
+  if (p.state === "running") return { s: "running", label: "running", detail: `pid ${p.pid} · up ${duration(p.uptime_s)}` };
+  if (p.state === "stopping") return { s: "stopping", label: "stopping…", detail: `pid ${p.pid}` };
+  if (p.external) return { s: "external", label: "external", detail: `${p.topic} is live` };
+  if (p.state === "exited") {
+    return { s: p.returncode ? "fault" : "idle", label: p.returncode ? `crashed (code ${p.returncode})` : "exited (code 0)",
+             detail: p.ended_at ? `at ${clock(p.ended_at)}` : "" };
+  }
+  return { s: "stopped", label: "stopped", detail: p.ended_at ? `since ${clock(p.ended_at)}` : "" };
+}
+
+function renderProcesses() {
+  if (!state.procEls) return;
+  const refused = !!state.config.processes.refusal;
+  const byName = Object.fromEntries(state.procs.map((p) => [p.name, p]));
+  const allBusy = state.procPending.has("all");
+  let canStart = false, canStop = false;
+  for (const [name, el] of Object.entries(state.procEls)) {
+    const p = byName[name];
+    const v = procView(p);
+    el.badge.dataset.s = v.s;
+    el.badge.textContent = v.label;
+    el.detail.textContent = v.detail;
+    const busy = allBusy || state.procPending.has(name) || !state.connected || !p;
+    const running = p && p.state === "running";
+    const startable = p && !running && p.state !== "stopping" && !p.external && !refused;
+    el.buttons.start.disabled = busy || !startable;
+    el.buttons.stop.disabled = busy || !running;
+    el.buttons.restart.disabled = busy || !running || refused;
+    canStart ||= !!startable;
+    canStop ||= !!running;
+  }
+  $("proc-start-all").disabled = allBusy || !state.connected || !canStart;
+  $("proc-stop-all").disabled = allBusy || !state.connected || !canStop;
+  renderLog();
+}
+
+function addLogs(batch) {
+  for (const [name, lines] of Object.entries(batch || {})) {
+    let l = state.logs.get(name);
+    if (!l) { l = []; state.logs.set(name, l); }
+    l.push(...lines);
+    if (l.length > LOG_KEEP) l.splice(0, l.length - LOG_KEEP);
+    if (name === state.logSel) state.logDirty = true;
+  }
+}
+
+function renderLog() {
+  if (!state.logDirty) return;
+  state.logDirty = false;
+  const pre = $("proc-log");
+  const c = state.config.processes.components.find((x) => x.name === state.logSel);
+  $("proc-log-h").textContent = c ? `Log: ${c.title}` : "Log";
+  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  const lines = state.logs.get(state.logSel) || [];
+  pre.textContent = lines.length ? lines.map(([, t, text]) => `${clock(t)}  ${text}`).join("\n")
+    : "No output yet. Only processes started from this dashboard have a log here.";
+  if (atBottom) pre.scrollTop = pre.scrollHeight;   // follow, unless scrolled up to read
 }
 
 // --- connection -----------------------------------------------------------------------------
@@ -670,6 +819,10 @@ function connect() {
       addSeries(m.series);
       state.connected = true;
       state.lastTick = Date.now();
+      state.procs = m.processes || [];
+      state.logs.clear();
+      addLogs(m.logs);
+      state.logDirty = true;
       syncMetricCharts();
       return;
     }
@@ -681,6 +834,8 @@ function connect() {
     addSeries(m.series);
     state.health = m.health;
     state.policy = m.policy || {};
+    state.procs = m.processes || [];
+    addLogs(m.logs);
     if (m.events.length) {
       state.events.push(...m.events);
       if (state.events.length > 500) state.events.splice(0, state.events.length - 500);
@@ -705,6 +860,7 @@ function frame(ts) {
     if (ts - lastDom > 66) {  // ~15 Hz for DOM-heavy panels
       lastDom = ts;
       renderConn();
+      renderProcesses();
       renderPolicy();
       renderManual();
       renderJoints();
@@ -738,6 +894,7 @@ async function main() {
   buildCharts();
   buildJoints();
   buildManual();
+  buildProcesses();
   connect();
   requestAnimationFrame(frame);
 }

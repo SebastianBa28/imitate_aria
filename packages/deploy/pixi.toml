@@ -3,6 +3,7 @@
 #
 #   cd packages/deploy
 #   pixi run test            # unit tests
+#   pixi run station         # dashboard only, start the simulated nodes from its Processes card
 #   pixi run mock            # whole station with simulated hand, arm and camera -> http://127.0.0.1:8000
 #   pixi run -e hw real      # ORCA hand + RealSense (the Franka controller runs on its own machine)
 #   (the dashboard is a static page in packages/dashboard/web, served by the station: no build step)
@@ -64,7 +65,8 @@ real = { cmd = "ros2 launch launch/robot.launch.py profile:=real", env = { ROS_D
 # real arm + RealSense with a simulated hand (before the ORCA hand is connected);
 # append camera:=mock to also simulate the camera, e.g. `pixi run -e hw real-arm camera:=mock`
 real-arm = { cmd = "ros2 launch launch/robot.launch.py profile:=real hand:=mock", env = { ROS_DOMAIN_ID = "7" } }
-station = "python -m deploy.station.server"
+# dashboard alone; it starts and stops the mock nodes itself (Processes card), so domain 0
+station = { cmd = "python -m deploy.station.server", env = { ROS_DOMAIN_ID = "0" } }
 spike-env = "python spike/check_env.py"
 spike-ping = { cmd = "python spike/ros_ping.py", env = { ROS_DOMAIN_ID = "7" } }
 spike-realsense = "python spike/realsense_check.py"
