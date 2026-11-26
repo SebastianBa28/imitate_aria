@@ -20,6 +20,10 @@ Output, in --out-dir/<vrs stem>/ (default output/<vrs stem>/), raw and complete 
     per point (N):   points_world (T,N,3), depth (T,N), tracks (T,N,2) in frame pixels, vis (T,N), obj_id (N)
     hands:           hand_landmarks_device / hand_landmarks_world (T,2,21,3), hand_uv (T,2,21,2) in frame
                      pixels; axis 1 = (left, right); on-device hand tracking, NaN = hand not tracked
+                     hand_keypoints_world (T,2,3,3): wrist, index knuckle (MCP), pinky knuckle (MCP) = landmarks 5, 8, 17
+                     T_world_wrist (T,2,4,4): wrist pose from those 3 points, origin at the wrist, +z to the
+                     knuckles' midpoint, +x index -> pinky knuckle, +y = z cross x (out of the palm for the right
+                     hand, the ORCA palm-frame axes; out of the back for the left); NaN = hand not tracked
     per object (K):  object_names, boxes0 (K,4), masks0 (K,H,W)   (on frame 0, frame pixels)
     metadata:        vrs_path, fps, start, stride, scale, tracker, frame_hw, n_points (per object),
                      video_file, overlay_file, depth_video_file, depth_video_range_m, seg_file, video_hw
@@ -182,6 +186,7 @@ def read_synced(dp, rgb_ts):
 HANDS = ("left", "right")
 # Aria hand landmarks: 0-4 fingertips (thumb..pinky), 5 wrist, 6-7 thumb, 8-10 index, 11-13 middle,
 # 14-16 ring, 17-19 pinky (proximal -> distal), 20 palm centre. Chains as in projectaria_tools' rerun helpers.
+WRIST_KEYPOINTS = (5, 8, 17)  # wrist, index knuckle (MCP), pinky knuckle (MCP)
 HAND_CHAINS = [(5, 6, 7, 0), (5, 8, 9, 10, 1), (5, 11, 12, 13, 2), (5, 14, 15, 16, 3), (5, 17, 18, 19, 4),
                (6, 8, 11, 14, 17)]
 
@@ -207,6 +212,23 @@ def read_hands(dp, rgb_ts):
     found = np.isfinite(out).all((2, 3)).mean(0)
     print(f"  hands tracked in {found[0]:.0%} (left) / {found[1]:.0%} (right) of frames")
     return out
+
+
+def wrist_poses(lm):
+    """(..., 21, 3) landmarks -> (..., 4, 4) wrist poses in the same frame (see T_world_wrist in the docstring;
+    same axes as imitate_common.transforms.wrist_frame). NaN where a keypoint is missing or degenerate."""
+    w, i, p = (lm[..., k, :] for k in WRIST_KEYPOINTS)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z = (i + p) / 2 - w
+        z = z / np.linalg.norm(z, axis=-1, keepdims=True)
+        x = (p - i) - np.sum((p - i) * z, axis=-1, keepdims=True) * z
+        x = x / np.linalg.norm(x, axis=-1, keepdims=True)
+    T = np.full(lm.shape[:-2] + (4, 4), np.nan)
+    T[..., :3, 0], T[..., :3, 1], T[..., :3, 2], T[..., :3, 3] = x, np.cross(z, x), z, w
+    T[..., 3, :] = [0, 0, 0, 1]
+    bad = ~np.isfinite(T).all((-2, -1))
+    T[bad] = np.nan
+    return T
 
 
 # ----------------------------------------------------------------------------- step 1: segmentation-frame boxes
@@ -731,6 +753,8 @@ def save_outputs(out_dir, stem, args, frames, rgb_ts, T_world_device, session_id
     print(f"  wrote {seg_path}  (frame 0 boxes + SAM 2 masks)")
 
     npz_path = os.path.join(out_dir, f"{stem}_aina.npz")
+    hand_lm_world = (np.einsum("tij,thkj->thki", T_world_device[:, :3, :3], hand_lm_device)
+                     + T_world_device[:, None, None, :3, 3])
     np.savez_compressed(
         npz_path,
         # per frame (T)
@@ -746,9 +770,10 @@ def save_outputs(out_dir, stem, args, frames, rgb_ts, T_world_device, session_id
         obj_id=obj_id.astype(np.int32),
         # hands (on-device hand tracking), axis 1 = (left, right), 21 Aria landmarks
         hand_landmarks_device=hand_lm_device.astype(np.float32),
-        hand_landmarks_world=(np.einsum("tij,thkj->thki", T_world_device[:, :3, :3], hand_lm_device)
-                              + T_world_device[:, None, None, :3, 3]).astype(np.float32),
+        hand_landmarks_world=hand_lm_world.astype(np.float32),
         hand_uv=hand_uv.astype(np.float32),
+        hand_keypoints_world=hand_lm_world[:, :, list(WRIST_KEYPOINTS)].astype(np.float32),
+        T_world_wrist=wrist_poses(hand_lm_world),
         # per object (K)
         object_names=np.array([p for p, _ in boxes]),
         boxes0=np.array([b for _, b in boxes], dtype=np.float32).reshape(-1, 4),
