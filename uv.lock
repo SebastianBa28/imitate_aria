@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -951,6 +951,7 @@ dependencies = [
     { name = "imageio" },
     { name = "joblib" },
     { name = "lerobot", extra = ["dataset"] },
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "open3d" },
@@ -959,6 +960,7 @@ dependencies = [
     { name = "pillow" },
     { name = "projectaria-client-sdk" },
     { name = "projectaria-tools" },
+    { name = "pyarrow" },
     { name = "scipy" },
     { name = "timm" },
     { name = "torch" },
@@ -976,6 +978,7 @@ requires-dist = [
     { name = "imageio" },
     { name = "joblib" },
     { name = "lerobot", extras = ["dataset"], specifier = ">=0.7" },
+    { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "open3d" },
@@ -984,6 +987,7 @@ requires-dist = [
     { name = "pillow" },
     { name = "projectaria-client-sdk", specifier = ">=2.6" },
     { name = "projectaria-tools", specifier = ">=2.3,<2.5" },
+    { name = "pyarrow", specifier = ">=26.0.1" },
     { name = "scipy" },
     { name = "timm" },
     { name = "torch", specifier = ">=2.7", index = "https://download.pytorch.org/whl/cu128" },

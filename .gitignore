@@ -44,3 +44,9 @@ third_party/
 datasets/
 
 CLAUDE.md 
+*.pt
+*.log
+__pycache__/
+*.pt
+*.log
+__pycache__/

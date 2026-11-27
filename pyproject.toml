@@ -32,6 +32,8 @@ dependencies = [
     "open3d",
     # LeRobot dataset building + upload (packages/data/log.py)
     "lerobot[dataset]>=0.7",
+    "pyarrow>=26.0.1",
+    "matplotlib>=3.11.2",
 ]
 
 [tool.uv]
