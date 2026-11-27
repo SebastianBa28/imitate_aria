@@ -45,6 +45,7 @@ pyserial = "*"
 # rwr_system installed this with --no-deps because it declared a newer numpy than rwr pinned.
 # Here numpy is not pinned; if the solve still conflicts, see spike/README.md.
 orca_core = "==0.5.2"
+depthai = "==2.32.0.0"
 
 [feature.hw.target.linux-64.pypi-dependencies]
 pyrealsense2 = "*"
@@ -78,5 +79,5 @@ spike-orca = "python spike/orca_check.py"
 [feature.hw.tasks]
 station-real = { cmd = "python -m deploy.station.server", env = { ROS_DOMAIN_ID = "7", IMITATE_STATION_PROFILE = "real" } }
 station-real-arm = { cmd = "python -m deploy.station.server", env = { ROS_DOMAIN_ID = "7", IMITATE_STATION_PROFILE = "real", IMITATE_STATION_HAND = "mock" } }
-# in-scene human demo from the D435 (colour + aligned depth, camera only): see tools/record_d435.py
-record-d435 = "python tools/record_d435.py"
+# in-scene human demo from every connected RealSense/OAK (colour + aligned depth, camera only): tools/record_cams.py
+record-cams = "python tools/record_cams.py"
