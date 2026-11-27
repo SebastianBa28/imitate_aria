@@ -321,12 +321,24 @@ async function sendProcess(name, action) {
   state.procPending.add(name);
   out.dataset.ok = "true";
   out.textContent = `${action} ${name}…`;
-  try {
+  const post = async (confirmed) => {
     const res = await fetch("/api/process", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, action }),
+      body: JSON.stringify({ name, action, confirmed }),
     });
-    const body = await res.json().catch(() => ({ ok: false, message: `HTTP ${res.status}` }));
+    return res.json().catch(() => ({ ok: false, message: `HTTP ${res.status}` }));
+  };
+  try {
+    // the server decides what needs confirming (real hardware that moves) and answers 409 + the warning
+    let body = await post(false);
+    if (body.confirm) {
+      if (!confirm(`${action[0].toUpperCase() + action.slice(1)} ${name} on the real robot?\n\n${body.confirm}`)) {
+        out.dataset.ok = "true";
+        out.textContent = `${action} ${name}: cancelled`;
+        return;
+      }
+      body = await post(true);
+    }
     out.dataset.ok = String(!!body.ok);
     out.textContent = body.message;
   } catch (e) {
@@ -346,6 +358,7 @@ function selectLog(name) {
 function buildProcesses() {
   const pc = state.config.processes;
   $("proc-profile").textContent = `(${pc.profile} profile, ROS domain ${pc.domain})`;
+  $("proc-card").dataset.profile = pc.profile;
   $("proc-refusal").hidden = !pc.refusal;
   $("proc-refusal").textContent = pc.refusal || "";
   state.procEls = {};
@@ -365,7 +378,7 @@ function buildProcesses() {
     const box = document.createElement("div");
     box.className = "actions";
     const buttons = {};
-    for (const a of ["start", "stop", "restart"]) {
+    for (const a of c.managed === false ? [] : ["start", "stop", "restart"]) {
       const b = document.createElement("button");
       b.className = "small";
       b.textContent = a[0].toUpperCase() + a.slice(1);
@@ -373,16 +386,20 @@ function buildProcesses() {
       box.appendChild(b);
       buttons[a] = b;
     }
+    if (c.managed === false) {
+      box.innerHTML = `<span class="muted">runs on its own machine</span>`;
+    }
     act.appendChild(box);
     row.append(name, st, detail, act);
     row.addEventListener("click", () => selectLog(c.name));
-    state.procEls[c.name] = { row, badge, detail, buttons };
+    state.procEls[c.name] = { row, badge, detail, buttons, comp: c };
     return row;
   });
   $("proc-body").replaceChildren(...rows);
   $("proc-start-all").addEventListener("click", () => sendProcess("all", "start"));
   $("proc-stop-all").addEventListener("click", () => sendProcess("all", "stop"));
-  if (pc.components.length) selectLog(pc.components[0].name);
+  const first = pc.components.find((c) => c.managed !== false) || pc.components[0];
+  if (first) selectLog(first.name);
 }
 
 function duration(s) {
@@ -392,8 +409,15 @@ function duration(s) {
 }
 const clock = (t) => new Date((t - state.clockOffset) * 1000).toLocaleTimeString([], { hour12: false });
 
-function procView(p) {
+function procView(p, c) {
   if (!state.connected || !p) return { s: "unknown", label: "unknown", detail: "" };
+  if (p.managed === false) {
+    return p.external ? { s: "running", label: "live", detail: `${p.topic} is live` }
+      : { s: "missing", label: "no data", detail: `nothing on ${p.topic}: start ${c ? c.label : "it"}` };
+  }
+  if (c && c.missing && c.missing.length && p.state !== "running" && !p.external) {
+    return { s: "fault", label: "unavailable", detail: `needs ${c.missing.join(", ")}: use the hw env` };
+  }
   if (p.state === "running") return { s: "running", label: "running", detail: `pid ${p.pid} · up ${duration(p.uptime_s)}` };
   if (p.state === "stopping") return { s: "stopping", label: "stopping…", detail: `pid ${p.pid}` };
   if (p.external) return { s: "external", label: "external", detail: `${p.topic} is live` };
@@ -412,13 +436,15 @@ function renderProcesses() {
   let canStart = false, canStop = false;
   for (const [name, el] of Object.entries(state.procEls)) {
     const p = byName[name];
-    const v = procView(p);
+    const v = procView(p, el.comp);
     el.badge.dataset.s = v.s;
     el.badge.textContent = v.label;
     el.detail.textContent = v.detail;
+    if (el.comp.managed === false) continue;
+    const missing = !!(el.comp.missing && el.comp.missing.length);
     const busy = allBusy || state.procPending.has(name) || !state.connected || !p;
     const running = p && p.state === "running";
-    const startable = p && !running && p.state !== "stopping" && !p.external && !refused;
+    const startable = p && !running && p.state !== "stopping" && !p.external && !refused && !missing;
     el.buttons.start.disabled = busy || !startable;
     el.buttons.stop.disabled = busy || !running;
     el.buttons.restart.disabled = busy || !running || refused;

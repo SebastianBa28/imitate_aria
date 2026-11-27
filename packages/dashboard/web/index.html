@@ -42,7 +42,9 @@
           </table>
           <p id="proc-result" class="cmd-result" aria-live="polite"></p>
           <p class="hint">Processes started here stop when the station stops. "External" means the topic is already
-            published by a process started elsewhere (e.g. <code>pixi run mock</code>); stop it there first.</p>
+            published by a process started elsewhere (e.g. <code>pixi run mock</code>); stop it there first.
+            The profile is chosen when the station starts: <code>pixi run station</code> (simulated) or
+            <code>pixi run -e hw station-real</code> (real hand + RealSense; the arm controller runs on the NUC).</p>
         </div>
         <div class="proc-log">
           <h3 id="proc-log-h">Log</h3>

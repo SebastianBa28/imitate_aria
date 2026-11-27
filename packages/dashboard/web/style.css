@@ -347,3 +347,4 @@ body.offline .grid { opacity: 0.55; }
 .status[data-s="external"]::before { background: transparent; border: 2px solid var(--good); }
 .status[data-s="stopped"]::before, .status[data-s="unknown"]::before { background: transparent; border: 1.5px solid var(--muted); }
 code { font: 12px var(--mono); }
+#proc-card[data-profile="real"] #proc-profile { color: var(--serious); font-weight: 600; }

@@ -6,7 +6,8 @@ import time
 
 import pytest
 
-from deploy.components import ROBOT_DOMAIN_ID, components, domain_refusal, is_live
+from deploy.components import (CAMERA_ENV, HAND_ENV, PROFILE_ENV, ROBOT_DOMAIN_ID, components, domain_refusal,
+                               is_live, monitored, station_selection)
 from deploy.station.supervisor import Spec, Supervisor
 
 
@@ -220,3 +221,32 @@ def test_domain_refusal_and_liveness():
     assert not is_live({"age_s": 10.0})
     assert not is_live({"age_s": None})
     assert not is_live(None)
+
+
+def test_real_hardware_needs_confirmation_and_drivers():
+    comps = {c.name: c for c in components("real")}
+    assert comps["hand"].confirm and comps["hand"].requires == ("orca_core",)
+    assert comps["camera"].requires == ("pyrealsense2",)
+    assert not comps["policy"].confirm
+    mock = {c.name: c for c in components("real", hand="mock", camera="mock")}
+    assert not mock["hand"].confirm and not mock["hand"].requires and not mock["camera"].requires
+    assert all(not c.confirm and not c.requires for c in components("mock"))
+    assert components("mock")[0].missing_modules() == []
+    from deploy.components import Component
+    assert Component("x", "m", "X", "/t", requires=("no_such_module_xyz",)).missing_modules() == ["no_such_module_xyz"]
+
+
+def test_real_profile_monitors_the_arm_without_starting_it():
+    assert monitored("mock") == []
+    (arm,) = monitored("real")
+    assert arm.name == "arm" and not arm.managed and arm.label == "multipanda_ros2 on the NUC"
+    assert "arm" not in {c.name for c in components("real")}
+
+
+def test_station_selection_from_env():
+    assert station_selection({}) == ("mock", None, None)
+    assert station_selection({PROFILE_ENV: " Real ", HAND_ENV: "mock", CAMERA_ENV: ""}) == ("real", "mock", None)
+    with pytest.raises(ValueError):
+        station_selection({PROFILE_ENV: "sim"})
+    with pytest.raises(ValueError):
+        station_selection({PROFILE_ENV: "real", HAND_ENV: "orca"})

@@ -1,6 +1,7 @@
 """Dashboard server: one process with the ROS bridge (background thread) and a FastAPI app.
 
     python -m deploy.station.server            # http://127.0.0.1:8000 (station.host/port in station.yaml)
+    pixi run station / pixi run -e hw station-real / station-real-arm   (profile via IMITATE_STATION_*)
 
 API
   GET  /api/config     joint names, series list, expected rates
@@ -8,14 +9,18 @@ API
                        {"target": "hand", "cmd": estop|torque_on|torque_off}
                        {"target": "all", "cmd": "estop"}   policy stop + hand e-stop
   POST /api/manual     manual targets while the policy node is in "manual" (deploy/manual.py)
-  POST /api/process    {"name": arm|hand|camera|policy|all, "action": start|stop|restart}
+  POST /api/process    {"name": arm|hand|camera|policy|all, "action": start|stop|restart, "confirmed": bool}
+                       starting a component with a `confirm` warning (the real hand) needs confirmed=true,
+                       else 409 {"ok": false, "confirm": "<warning>"}
   GET  /api/processes  state of the processes the dashboard can start (deploy/station/supervisor.py)
   WS   /ws             text JSON: {"type": "snapshot"|"tick", ...}; binary: 1 byte channel (0 colour,
                        1 depth) + JPEG
 
-Processes: the station starts and stops the mock profile's nodes itself (deploy.components). They stop
-with the station. A node whose topic is already live (e.g. started by `pixi run mock`) shows as
-"external" and is not started twice.
+Processes: the station starts and stops one profile's nodes itself (deploy.components; IMITATE_STATION_PROFILE
+= mock (default) | real, IMITATE_STATION_HAND / _CAMERA = mock|real override it). They stop with the station.
+A node whose topic is already live (e.g. started by `pixi run mock`) shows as "external" and is not started
+twice. In the real profile the arm (Franka controller on the NUC) is shown, never started. The mock profile
+is refused on the robot's domain; hardware nodes are refused when their driver module is missing (default env).
 """
 import asyncio
 import contextlib
@@ -33,7 +38,7 @@ from pydantic import BaseModel
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 
 from deploy import config as cfg
-from deploy.components import LIVE_AGE_S, components, domain_refusal, is_live
+from deploy.components import LIVE_AGE_S, components, domain_refusal, is_live, monitored, station_selection
 from deploy.station.bridge import EventLog, StationBridge
 from deploy.station.buffers import SeriesStore
 from deploy.station.camera import DEPTH_RANGE_MM, CameraEncoder
@@ -47,9 +52,10 @@ WEB_DIR = cfg.DEPLOY_ROOT.parent / "dashboard" / "web"   # static page, no build
 ROBOT_ASSETS = cfg.DEPLOY_ROOT / "assets" / "robot"
 CHANNELS = {"color": 0, "depth": 1}
 SNAPSHOT_POINTS, TICK_POINTS = 1500, 60
-PROFILE = "mock"          # processes the dashboard can start; the real profile is a later step
+PROFILE, HAND, CAMERA = station_selection(os.environ)   # processes the dashboard can start
 DOMAIN = os.environ.get("ROS_DOMAIN_ID", "0")
-COMPONENTS = {c.name: c for c in components(PROFILE)}
+COMPONENTS = {c.name: c for c in components(PROFILE, hand=HAND, camera=CAMERA)}
+MONITORED = {c.name: c for c in monitored(PROFILE)}       # shown, never started (the NUC's arm controller)
 LOG_SNAPSHOT_LINES, LOG_TICK_LINES = 300, 200
 
 
@@ -72,6 +78,10 @@ def process_guard(name):
     if refusal:
         return refusal
     c = COMPONENTS[name]
+    missing = c.missing_modules()
+    if missing:
+        return (f"{c.label} needs {', '.join(missing)}, which this environment lacks: start the station in the "
+                "hw env (`pixi run -e hw station-real`)")
     if is_live(S.health.snapshot().get(c.topic)) and not recently_ours(name):
         return f"{c.topic} is already published: {c.label} runs outside the dashboard (stop it there first)"
     return None
@@ -91,11 +101,27 @@ def process_status():
         ours = p["state"] in ("running", "stopping") or recently_ours(p["name"])
         p["external"] = not ours and is_live(health.get(c.topic))
         p["topic"] = c.topic
+        p["managed"] = True
+    for c in MONITORED.values():
+        out.append({"name": c.name, "title": c.title, "state": "stopped", "managed": False, "pid": None,
+                    "returncode": None, "started_at": None, "ended_at": None, "uptime_s": None,
+                    "external": is_live(health.get(c.topic)), "topic": c.topic})
     return out
 
 
+def needs_confirmation(name, action):
+    """Warnings the user must accept before this start/restart, joined, or "" (stops never need one)."""
+    if action not in ("start", "restart"):
+        return ""
+    names = list(COMPONENTS) if name == "all" else [name]
+    running = {p["name"] for p in S.supervisor.status() if p["state"] in ("running", "stopping")}
+    if action == "start":
+        names = [n for n in names if n not in running]
+    return " ".join(dict.fromkeys(COMPONENTS[n].confirm for n in names if n in COMPONENTS and COMPONENTS[n].confirm))
+
+
 def start_supervisor():
-    for c in COMPONENTS.values():
+    for c in [*COMPONENTS.values(), *MONITORED.values()]:
         S.health.watch(c.topic)   # the guard needs them even if station.yaml doesn't list them
     specs = {c.name: Spec(c.argv(), title=c.title, cwd=str(cfg.DEPLOY_ROOT)) for c in COMPONENTS.values()}
     S.supervisor = Supervisor(specs, guard=process_guard,
@@ -161,8 +187,9 @@ def get_config():
                    "stream_hz": SC["camera_hz"], "depth_range_mm": list(DEPTH_RANGE_MM)},
         "robot_assets": ROBOT_ASSETS.exists(),
         "processes": {"profile": PROFILE, "domain": DOMAIN, "refusal": domain_refusal(PROFILE, DOMAIN),
-                      "components": [{"name": c.name, "title": c.title, "label": c.label, "topic": c.topic}
-                                     for c in COMPONENTS.values()]},
+                      "components": [{"name": c.name, "title": c.title, "label": c.label, "topic": c.topic,
+                                      "managed": c.managed, "confirm": c.confirm, "missing": c.missing_modules()}
+                                     for c in [*MONITORED.values(), *COMPONENTS.values()]]},
     }
 
 
@@ -197,6 +224,7 @@ async def command(c: Command):
 class ProcessCommand(BaseModel):
     name: str
     action: str
+    confirmed: bool = False   # the user accepted the components' `confirm` warnings
 
 
 @app.get("/api/processes")
@@ -207,6 +235,13 @@ def get_processes():
 @app.post("/api/process")
 async def process_command(c: ProcessCommand):
     sv = S.supervisor
+    if c.name in MONITORED:
+        return JSONResponse({"ok": False, "message": f"{MONITORED[c.name].title} runs on its own machine "
+                             f"({MONITORED[c.name].label}); the dashboard only shows it"}, status_code=400)
+    warning = needs_confirmation(c.name, c.action) if c.name == "all" or c.name in COMPONENTS else ""
+    if warning and not c.confirmed:
+        return JSONResponse({"ok": False, "confirm": warning,
+                             "message": f"{c.action} {c.name} needs confirmation: {warning}"}, status_code=409)
     if c.name == "all":
         fn = {"start": sv.start_all, "stop": sv.stop_all}.get(c.action)
     else:
