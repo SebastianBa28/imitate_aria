@@ -46,6 +46,7 @@ pixi run station                     # dashboard alone (domain 0); start/stop th
 pixi run -e hw station-real          # dashboard alone, real profile (domain 7): start the real hand/RealSense/policy from the card
 pixi run -e hw station-real-arm      # same with a simulated hand
 pixi run -e hw spike-orca            # reads hand joints, moves nothing; needs config/orca/right/calibration.yaml
+pixi run -e hw record-d435 --name x  # in-scene human demo from the D435 (camera only; stop realsense_node first): raw_data/d435/<name>_<mon><day>/ color/*.jpg + depth/*.png (uint16 mm, aligned to colour) + frames.csv + meta.json
 pixi run -e hw ros2 launch launch/robot.launch.py profile:=real calibrate:=true   # recalibrate the hand (fingers sweep full range)
 ```
 

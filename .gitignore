@@ -48,3 +48,6 @@ datasets/
 .pixi/
 *.egg-info/
 spike_realsense.png
+
+# raw recordings (Aria .vrs is ignored above; D435 demos are folders of images)
+raw_data/

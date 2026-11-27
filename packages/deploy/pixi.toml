@@ -78,3 +78,5 @@ spike-orca = "python spike/orca_check.py"
 [feature.hw.tasks]
 station-real = { cmd = "python -m deploy.station.server", env = { ROS_DOMAIN_ID = "7", IMITATE_STATION_PROFILE = "real" } }
 station-real-arm = { cmd = "python -m deploy.station.server", env = { ROS_DOMAIN_ID = "7", IMITATE_STATION_PROFILE = "real", IMITATE_STATION_HAND = "mock" } }
+# in-scene human demo from the D435 (colour + aligned depth, camera only): see tools/record_d435.py
+record-d435 = "python tools/record_d435.py"
