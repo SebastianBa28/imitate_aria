@@ -14,10 +14,10 @@ API
                        else 409 {"ok": false, "confirm": "<warning>"}
   GET  /api/processes  state of the processes the dashboard can start (deploy/station/supervisor.py)
   WS   /ws             text JSON: {"type": "snapshot"|"tick", ...}; binary: 1 byte channel (0 colour,
-                       1 depth) + JPEG
+                       1 depth, 2 OAK colour, 3 OAK depth) + JPEG
 
 Processes: the station starts and stops one profile's nodes itself (deploy.components; IMITATE_STATION_PROFILE
-= mock (default) | real, IMITATE_STATION_HAND / _CAMERA = mock|real override it). They stop with the station.
+= mock (default) | real, IMITATE_STATION_HAND / _CAMERA = mock|real and _OAK = mock|real|off override it). They stop with the station.
 A node whose topic is already live (e.g. started by `pixi run mock`) shows as "external" and is not started
 twice. In the real profile the arm (Franka controller on the NUC) is shown, never started. The mock profile
 is refused on the robot's domain; hardware nodes are refused when their driver module is missing (default env).
@@ -44,24 +44,27 @@ from deploy.station.buffers import SeriesStore
 from deploy.station.camera import DEPTH_RANGE_MM, CameraEncoder
 from deploy.station.monitor import HealthBoard
 from deploy.station.supervisor import Spec, Supervisor
-from imitate_common import hand
+from imitate_common import contract, hand
 
 CONF = cfg.load()
 SC = CONF["station"]
 WEB_DIR = cfg.DEPLOY_ROOT.parent / "dashboard" / "web"   # static page, no build step
 ROBOT_ASSETS = cfg.DEPLOY_ROOT / "assets" / "robot"
-CHANNELS = {"color": 0, "depth": 1}
+CHANNELS = {"color": 0, "depth": 1, "oak_color": 2, "oak_depth": 3}   # byte 0 of a binary WS message
 SNAPSHOT_POINTS, TICK_POINTS = 1500, 60
-PROFILE, HAND, CAMERA = station_selection(os.environ)   # processes the dashboard can start
+PROFILE, HAND, CAMERA, OAK = station_selection(os.environ)   # processes the dashboard can start
 DOMAIN = os.environ.get("ROS_DOMAIN_ID", "0")
-COMPONENTS = {c.name: c for c in components(PROFILE, hand=HAND, camera=CAMERA)}
+COMPONENTS = {c.name: c for c in components(PROFILE, hand=HAND, camera=CAMERA, oak=OAK)}
 MONITORED = {c.name: c for c in monitored(PROFILE)}       # shown, never started (the NUC's arm controller)
 LOG_SNAPSHOT_LINES, LOG_TICK_LINES = 300, 200
+# health lights: drop the OAK's topics when it is switched off (IMITATE_STATION_OAK=off), not "missing" forever
+EXPECTED_HZ = {t: hz for t, hz in SC["expected_hz"].items()
+               if "oak" in COMPONENTS or t not in (contract.OAK_COLOR, contract.OAK_DEPTH)}
 
 
 class State:
     store = SeriesStore(SC["history_s"])
-    health = HealthBoard(SC["expected_hz"])
+    health = HealthBoard(EXPECTED_HZ)
     events = EventLog()
     bridge = None
     camera = None
@@ -175,7 +178,7 @@ def get_config():
         "joint_lower": hand.LOWER_RAD.tolist(),
         "joint_upper": hand.UPPER_RAD.tolist(),
         "series": S.store.describe(),
-        "expected_hz": SC["expected_hz"],
+        "expected_hz": EXPECTED_HZ,
         "history_s": SC["history_s"],
         "stream_hz": SC["stream_hz"],
         "policy": {"plugin": CONF["policy"]["plugin"], "hz": CONF["policy"]["hz"], "checkpoint": CONF["policy"].get("checkpoint"),
@@ -185,6 +188,9 @@ def get_config():
         "hand_neutral": hand.NEUTRAL_RAD.tolist(),
         "camera": {"width": CONF["camera"]["width"], "height": CONF["camera"]["height"], "fps": CONF["camera"]["fps"],
                    "stream_hz": SC["camera_hz"], "depth_range_mm": list(DEPTH_RANGE_MM)},
+        "oak": ({"width": CONF["oak"]["width"], "height": CONF["oak"]["height"], "fps": CONF["oak"]["fps"]}
+                if "oak" in COMPONENTS else None),
+        "channels": list(CHANNELS),
         "robot_assets": ROBOT_ASSETS.exists(),
         "processes": {"profile": PROFILE, "domain": DOMAIN, "refusal": domain_refusal(PROFILE, DOMAIN),
                       "components": [{"name": c.name, "title": c.title, "label": c.label, "topic": c.topic,

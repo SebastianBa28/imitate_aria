@@ -3,8 +3,9 @@
     ros2 launch launch/robot.launch.py profile:=mock     # simulated hand, arm and camera (dev machine)
     ros2 launch launch/robot.launch.py profile:=real     # ORCA hand + RealSense; the Franka controller runs on its own machine
 Options: station:=false (no dashboard server), policy:=false, calibrate:=true (real hand, it moves),
-hand:=mock|real and camera:=mock|real override the profile (e.g. profile:=real hand:=mock tests the real
-arm and camera without the ORCA hand; the arm is never mocked in the real profile).
+hand:=mock|real, camera:=mock|real (RealSense) and oak:=mock|real|off (second camera) override the profile
+(e.g. profile:=real hand:=mock tests the real arm and cameras without the ORCA hand; the arm is never mocked
+in the real profile).
 Run from packages/deploy/ (the pixi tasks do).
 """
 import os
@@ -30,7 +31,7 @@ def setup(context):
     refusal = domain_refusal(profile, os.environ.get("ROS_DOMAIN_ID", "0"))
     if refusal:
         raise RuntimeError(refusal)
-    comps = components(profile, hand=get("hand"), camera=get("camera"),   # raises on bad values
+    comps = components(profile, hand=get("hand"), camera=get("camera"), oak=get("oak"),   # raises on bad values
                        calibrate=get("calibrate") == "true", policy=get("policy") == "true")
     nodes = [process(c.argv(), c.label) for c in comps]
     if get("station") == "true":
@@ -45,6 +46,7 @@ def generate_launch_description():
         DeclareLaunchArgument("station", default_value="true"),
         DeclareLaunchArgument("calibrate", default_value="false", description="real hand: calibrate on startup (moves)"),
         DeclareLaunchArgument("hand", default_value="", description="mock or real; default: the profile"),
-        DeclareLaunchArgument("camera", default_value="", description="mock or real; default: the profile"),
+        DeclareLaunchArgument("camera", default_value="", description="RealSense: mock or real; default: the profile"),
+        DeclareLaunchArgument("oak", default_value="", description="OAK: mock, real or off; default: the profile"),
         OpaqueFunction(function=setup),
     ])

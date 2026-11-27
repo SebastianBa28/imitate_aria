@@ -2,3 +2,4 @@
 calibration.yaml
 calibration_right.yaml
 calibration_left.yaml
+calibration.backup-*.yaml

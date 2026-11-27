@@ -22,6 +22,12 @@ camera:
   height: 480
   fps: 30
 
+oak:                                # second camera (Luxonis OAK, deploy/nodes/oak_node.py)
+  width: 960                        # colour: 1080p sensor scaled by 1/2 on the device (full FOV);
+  height: 540                       # depth (640x400 stereo) is aligned to it at this size
+  fps: 30
+  ir_projector_ma: 0                # IR dot projector (OAK Pro only), 0 = off; ~800 helps on plain surfaces
+
 policy:
   hz: 10
   plugin: deploy.policies.demo:DemoPolicy   # module:Class implementing deploy.policies.base.Policy
@@ -55,4 +61,6 @@ station:
     /right/arm/end_effector_pose: 30   # multipanda_ros2 publishes ~30 Hz (measured with spike-ping arm)
     /camera/color/image_raw: 30
     /camera/depth/image_raw: 30
+    /oak/color/image_raw: 30
+    /oak/depth/image_raw: 30
     /policy/metrics: 10

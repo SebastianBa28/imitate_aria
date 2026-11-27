@@ -51,8 +51,8 @@ class StationBridge(Node):
             health.watch(topic)
 
         self.policy_state = {}
-        self.camera = {"color": None, "depth": None}   # (msg, seq)
-        self._seq = {"color": 0, "depth": 0}
+        self.camera = {ch: None for ch in ("color", "depth", "oak_color", "oak_depth")}   # (msg, seq)
+        self._seq = {ch: 0 for ch in self.camera}
         self.camera_k = None
         self._lock = threading.Lock()
 
@@ -67,6 +67,8 @@ class StationBridge(Node):
         self.create_subscription(String, contract.POLICY_STATE, self.on_policy_state, LATCHED_QOS)
         self.create_subscription(Image, contract.CAMERA_COLOR, self.image_to("color", contract.CAMERA_COLOR), SENSOR_QOS)
         self.create_subscription(Image, contract.CAMERA_DEPTH, self.image_to("depth", contract.CAMERA_DEPTH), SENSOR_QOS)
+        self.create_subscription(Image, contract.OAK_COLOR, self.image_to("oak_color", contract.OAK_COLOR), SENSOR_QOS)
+        self.create_subscription(Image, contract.OAK_DEPTH, self.image_to("oak_depth", contract.OAK_DEPTH), SENSOR_QOS)
         self.create_subscription(CameraInfo, contract.CAMERA_INFO, self.on_info, LATCHED_QOS)
 
         self.policy_cmd_pub = self.create_publisher(String, contract.POLICY_COMMAND, 10)

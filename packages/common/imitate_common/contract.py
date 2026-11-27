@@ -20,6 +20,11 @@ CAMERA_COLOR = "/camera/color/image_raw"           # sensor_msgs/Image rgb8
 CAMERA_DEPTH = "/camera/depth/image_raw"           # sensor_msgs/Image 16UC1, mm, aligned to color
 CAMERA_INFO = "/camera/color/camera_info"          # sensor_msgs/CameraInfo
 
+# second camera (Luxonis OAK), same message types and units
+OAK_COLOR = "/oak/color/image_raw"
+OAK_DEPTH = "/oak/depth/image_raw"                 # 16UC1, mm, aligned to the OAK colour
+OAK_INFO = "/oak/color/camera_info"
+
 # policy
 POLICY_ACTION_HAND = "/policy/action_hand"         # JointState, published in preview and live
 POLICY_ACTION_ARM = "/policy/action_arm"           # PoseStamped, published in preview and live

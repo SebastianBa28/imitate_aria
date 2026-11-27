@@ -196,14 +196,17 @@ button.danger-outline { color: var(--critical-ink); border-color: var(--critical
 
 /* --- camera ----------------------------------------------------------------------------- */
 .cams { display: grid; gap: 10px; }
-.cams[data-view="both"] { grid-template-columns: 1fr 1fr; }
-.cams[data-view="color"] figure[data-ch="depth"], .cams[data-view="depth"] figure[data-ch="color"] { display: none; }
+.cams[data-view="both"], .cams[data-which="both"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.cams[data-view="color"] figure[data-ch="depth"], .cams[data-view="depth"] figure[data-ch="color"],
+.cams[data-which="d435"] figure[data-src="oak"], .cams[data-which="oak"] figure[data-src="d435"] { display: none; }
 .cams figure { margin: 0; }
 .cams img {
   display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain;
   background: var(--surface-2); border-radius: 6px;
 }
 .cams figcaption { display: flex; justify-content: space-between; gap: 8px; align-items: center; font-size: 12px; margin-top: 4px; color: var(--ink-2); }
+.cams figcaption { flex-wrap: wrap; row-gap: 2px; }
+.cams figcaption span { white-space: nowrap; }
 .depth-scale { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 .depth-scale .ramp {
   width: 70px; height: 8px; border-radius: 2px;
@@ -219,52 +222,7 @@ tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
 .health td:first-child { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .health td.num { white-space: nowrap; }
 
-/* --- hand joints ------------------------------------------------------------------------ */
-.joints { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 2px 24px; }
-.joint {
-  display: grid; grid-template-columns: 92px 1fr 54px; align-items: center; gap: 8px;
-  padding: 3px 6px; border-radius: 6px; cursor: pointer; border: 1px solid transparent;
-  background: none; text-align: left; font-weight: 400;
-}
-.joint:hover { background: var(--surface-2); }
-.joint[aria-selected="true"] { border-color: var(--s1); background: var(--surface-2); }
-.joint .name { font-size: 12px; color: var(--ink-2); font-family: var(--mono); }
-.joint .val { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
-.track { position: relative; height: 18px; }
-.track::before {  /* range of motion */
-  content: ""; position: absolute; left: 0; right: 0; top: 7px; height: 4px;
-  border-radius: 2px; background: var(--grid);
-}
-.track .zero { position: absolute; top: 3px; width: 1px; height: 12px; background: var(--axis); }
-.track .m, .track .c, .track .p { position: absolute; transform: translateX(-50%); }
-.track .m { top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--s1); box-shadow: 0 0 0 2px var(--surface); z-index: 2; }
-.track .c { top: 1px; width: 3px; height: 16px; border-radius: 2px; background: var(--s2); z-index: 1; }
-.track .p { top: 2px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--s3); z-index: 3; }
-.track .lim { position: absolute; top: 18px; font-size: 10px; color: var(--muted); line-height: 1; }
-
-/* legend keys */
-.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-2); }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.key { display: inline-block; flex: none; }
-.key.dot { width: 10px; height: 10px; border-radius: 50%; }
-.key.tick { width: 3px; height: 14px; border-radius: 2px; }
-.key.ring { width: 12px; height: 12px; border-radius: 50%; border: 2px solid; background: transparent; }
-.key.line { width: 16px; height: 2px; border-radius: 1px; }
-.key.s1 { background: var(--s1); }
-.key.s2 { background: var(--s2); }
-.key.ring.s3 { border-color: var(--s3); background: transparent; }
-.key.line.s3, .key.dot.s3 { background: var(--s3); }
-th .key { margin-right: 6px; vertical-align: middle; }
-
-/* --- arm -------------------------------------------------------------------------------- */
-.arm-views { display: grid; grid-template-columns: 1fr 56px; gap: 8px; margin: 6px 0 8px; }
-#arm-xy { width: 100%; aspect-ratio: 1 / 1.1; display: block; }
-#arm-z { width: 100%; height: 100%; display: block; }
-.arm-table th { white-space: nowrap; }
-
 /* --- charts ----------------------------------------------------------------------------- */
-.plots { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; margin-top: 4px; }
-@media (max-width: 900px) { .plots { grid-template-columns: minmax(0, 1fr); } }
 .multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 .chart { position: relative; height: 150px; }
 .chart canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -301,26 +259,6 @@ th .key { margin-right: 6px; vertical-align: middle; }
 .events .lvl { font-size: 12px; color: var(--ink-2); }
 @media (max-width: 700px) { .events li { grid-template-columns: 64px 1fr; } .events .lvl, .events .src { display: none; } }
 
-/* --- manual control --------------------------------------------------------------------- */
-#manual-card .card-head h2 { flex: 0 1 auto; margin-right: 4px; }
-#manual-card .card-head #manual-state { margin-right: auto; }
-.manual-body { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 24px; }
-@media (max-width: 900px) { .manual-body { grid-template-columns: minmax(0, 1fr); } }
-.sub-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.sub-head h3 { margin: 6px 0; flex: 1; }
-.sliders { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 2px 20px; }
-.slider { display: grid; grid-template-columns: 86px 1fr 48px; align-items: center; gap: 8px; }
-.slider label { font: 12px var(--mono); color: var(--ink-2); }
-.slider output { font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
-.slider input { width: 100%; accent-color: var(--s3); }
-.jog { display: grid; grid-template-columns: auto auto; gap: 10px 16px; justify-content: start; align-items: center; }
-.jog-xy { display: grid; grid-template-columns: repeat(3, 56px); grid-template-rows: repeat(3, 40px); gap: 4px; }
-.jog-z { display: grid; grid-template-rows: 40px 40px; gap: 4px; }
-.jog-z button { width: 56px; }
-.jog button { font-weight: 600; }
-.jog-table, #jog-dist { grid-column: 1 / -1; }
-.jog-table { max-width: 320px; }
-#manual-card[data-active="false"] .manual-body { opacity: 0.5; }
 .status[data-s="manual"]::before { background: var(--good); }
 
 /* disconnected: everything but the top bar dims */

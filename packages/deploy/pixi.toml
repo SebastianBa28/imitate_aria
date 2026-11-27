@@ -45,6 +45,7 @@ pyserial = "*"
 # rwr_system installed this with --no-deps because it declared a newer numpy than rwr pinned.
 # Here numpy is not pinned; if the solve still conflicts, see spike/README.md.
 orca_core = "==0.5.2"
+depthai = "==2.32.0.0"   # Luxonis OAK camera (deploy/nodes/oak_node.py); 2.x API, as rwr_system used
 
 [feature.hw.target.linux-64.pypi-dependencies]
 pyrealsense2 = "*"

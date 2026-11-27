@@ -1693,6 +1693,7 @@ environments:
       - pypi: ./
       - pypi: https://files.pythonhosted.org/packages/52/80/a70f6b08b5e5a26f37638c49be96f5ec16a3b03b86932428f310aa1ae770/dynamixel_sdk-3.8.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/61/7b/e3db3b332285be200af5471e403d972c5e6b4025624d0fc24accde795761/pyrealsense2-2.59.2.11152-cp312-cp312-manylinux1_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/64/89/aa90368d743451e9826a97619c427d9653bf61659f13a34a11964bc3a5e5/depthai-2.32.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/ac/51/71e5e0fb1420f8cd668221395e378cfa7c4e53cd3ce65a8d0fd0d7367813/orca_core-0.5.2-py3-none-any.whl
       osx-arm64:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_3.conda
@@ -2204,6 +2205,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/52/80/a70f6b08b5e5a26f37638c49be96f5ec16a3b03b86932428f310aa1ae770/dynamixel_sdk-3.8.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ac/51/71e5e0fb1420f8cd668221395e378cfa7c4e53cd3ce65a8d0fd0d7367813/orca_core-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/cb/52/7fef62c31de5eedef7fa7aefc7eb9b978a5da2710fae962b22f0a3691eac/pyrealsense2_macosx-2.54.2-cp312-cp312-macosx_12_0_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/dc/e4/c9790cfc0dec543ad139c7888f72a06307df695b1200ccdd9fed0bfb54a2/depthai-2.32.0.0-cp312-cp312-macosx_11_0_arm64.whl
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
@@ -19476,6 +19478,11 @@ packages:
   version: 2.59.2.11152
   sha256: d857fac9394976f2153a2267112ed37cb025e979c62e7ac24bd0bfe753bc4b01
   requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/64/89/aa90368d743451e9826a97619c427d9653bf61659f13a34a11964bc3a5e5/depthai-2.32.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
+  name: depthai
+  version: 2.32.0.0
+  sha256: 075bff62e9669203d5a090e223a005dd528e95440928dc38984cf3b75b36a927
+  requires_python: '>=3.9'
 - pypi: https://files.pythonhosted.org/packages/ac/51/71e5e0fb1420f8cd668221395e378cfa7c4e53cd3ce65a8d0fd0d7367813/orca_core-0.5.2-py3-none-any.whl
   name: orca-core
   version: 0.5.2
@@ -19492,3 +19499,8 @@ packages:
   name: pyrealsense2-macosx
   version: 2.54.2
   sha256: 2e9f74e5082ea8562c82b60e56ee8d6bc5dca52b992693666899ce8a9a441049
+- pypi: https://files.pythonhosted.org/packages/dc/e4/c9790cfc0dec543ad139c7888f72a06307df695b1200ccdd9fed0bfb54a2/depthai-2.32.0.0-cp312-cp312-macosx_11_0_arm64.whl
+  name: depthai
+  version: 2.32.0.0
+  sha256: ad620828ba9d44675654898e2ba0284d485840fa8c04ad1e3e1aa2eb57bf23ff
+  requires_python: '>=3.9'

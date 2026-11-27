@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from deploy.components import (CAMERA_ENV, HAND_ENV, PROFILE_ENV, ROBOT_DOMAIN_ID, components, domain_refusal,
+from deploy.components import (CAMERA_ENV, HAND_ENV, OAK_ENV, PROFILE_ENV, ROBOT_DOMAIN_ID, components, domain_refusal,
                                is_live, monitored, station_selection)
 from deploy.station.supervisor import Spec, Supervisor
 
@@ -193,13 +193,13 @@ def test_children_die_when_the_station_is_killed(tmp_path):
 # --- components ---------------------------------------------------------------------------
 def test_mock_profile_components():
     comps = components("mock")
-    assert [c.name for c in comps] == ["arm", "hand", "camera", "policy"]
+    assert [c.name for c in comps] == ["arm", "hand", "camera", "oak", "policy"]
     hand = comps[1]
     assert hand.label == "hand_node"
     assert hand.argv("py") == ["py", "-m", "deploy.nodes.hand_node", "--ros-args",
                                "-p", "mock:=true", "-p", "calibrate:=false"]
     assert comps[2].module == "deploy.nodes.mock_camera"
-    assert [c.name for c in components("mock", policy=False)] == ["arm", "hand", "camera"]
+    assert [c.name for c in components("mock", policy=False)] == ["arm", "hand", "camera", "oak"]
 
 
 def test_real_profile_components_and_overrides():
@@ -211,6 +211,21 @@ def test_real_profile_components_and_overrides():
         components("sim")
     with pytest.raises(ValueError):
         components("mock", camera="fake")
+    with pytest.raises(ValueError):
+        components("mock", camera="off")   # only the OAK can be left out
+
+
+def test_oak_component():
+    mock = {c.name: c for c in components("mock")}["oak"]
+    assert mock.module == "deploy.nodes.mock_camera" and mock.label == "mock_oak" and not mock.requires
+    assert mock.argv("py") == ["py", "-m", "deploy.nodes.mock_camera", "--ros-args",
+                               "-p", "camera:=oak", "-r", "__node:=mock_oak"]
+    real = {c.name: c for c in components("real")}["oak"]
+    assert real.module == "deploy.nodes.oak_node" and real.requires == ("depthai",) and real.argv("py")[-1] == "deploy.nodes.oak_node"
+    assert {c.name: c for c in components("mock", oak="real")}["oak"].module == "deploy.nodes.oak_node"
+    assert "oak" not in {c.name for c in components("real", oak="off")}
+    with pytest.raises(ValueError):
+        components("real", oak="d435")
 
 
 def test_domain_refusal_and_liveness():
@@ -227,6 +242,7 @@ def test_real_hardware_needs_confirmation_and_drivers():
     comps = {c.name: c for c in components("real")}
     assert comps["hand"].confirm and comps["hand"].requires == ("orca_core",)
     assert comps["camera"].requires == ("pyrealsense2",)
+    assert comps["oak"].requires == ("depthai",) and not comps["oak"].confirm
     assert not comps["policy"].confirm
     mock = {c.name: c for c in components("real", hand="mock", camera="mock")}
     assert not mock["hand"].confirm and not mock["hand"].requires and not mock["camera"].requires
@@ -244,8 +260,9 @@ def test_real_profile_monitors_the_arm_without_starting_it():
 
 
 def test_station_selection_from_env():
-    assert station_selection({}) == ("mock", None, None)
-    assert station_selection({PROFILE_ENV: " Real ", HAND_ENV: "mock", CAMERA_ENV: ""}) == ("real", "mock", None)
+    assert station_selection({}) == ("mock", None, None, None)
+    assert station_selection({PROFILE_ENV: " Real ", HAND_ENV: "mock", CAMERA_ENV: ""}) == ("real", "mock", None, None)
+    assert station_selection({PROFILE_ENV: "real", OAK_ENV: "off"}) == ("real", None, None, "off")
     with pytest.raises(ValueError):
         station_selection({PROFILE_ENV: "sim"})
     with pytest.raises(ValueError):

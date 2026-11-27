@@ -11,13 +11,14 @@ ROBOT_DOMAIN_ID = "7"   # multipanda_ros2's `run` script on the NUC
 LIVE_AGE_S = 2.5        # a component's topic newer than this means it runs (policy state comes at 1 Hz)
 # what the station's Processes card manages (set by the pixi station tasks; default: mock)
 PROFILE_ENV, HAND_ENV, CAMERA_ENV = "IMITATE_STATION_PROFILE", "IMITATE_STATION_HAND", "IMITATE_STATION_CAMERA"
+OAK_ENV = "IMITATE_STATION_OAK"
 HAND_MOVES = ("hand_node moves the ORCA hand to its neutral pose on startup. Keep the fingers clear of "
               "objects and people.")
 
 
 @dataclass(frozen=True)
 class Component:
-    name: str               # short key used by the dashboard: hand, camera, arm, policy
+    name: str               # short key used by the dashboard: hand, camera, oak, arm, policy
     module: str             # python -m <module>
     title: str
     topic: str              # a topic it publishes: live means it is running, wherever it was started
@@ -26,32 +27,37 @@ class Component:
     confirm: str = ""       # starting it needs this warning accepted first (real hardware that moves)
     managed: bool = True    # False: runs elsewhere (the Franka controller); the dashboard only shows it
     host_label: str = ""    # label of an unmanaged component
+    node_name: str = ""     # ROS node name override (two components running the same module)
 
     @property
     def label(self):
         """Process name in launch output, e.g. hand_node."""
-        return self.host_label or self.module.rsplit(".", 1)[-1]
+        return self.host_label or self.node_name or self.module.rsplit(".", 1)[-1]
 
     def missing_modules(self):
         return [m for m in self.requires if importlib.util.find_spec(m) is None]
 
     def argv(self, python=None):
         cmd = [python or sys.executable, "-m", self.module]
-        if self.params:
-            cmd += ["--ros-args"] + [x for p in self.params for x in ("-p", p)]
-        return cmd
+        args = [x for p in self.params for x in ("-p", p)]
+        if self.node_name:
+            args += ["-r", f"__node:={self.node_name}"]
+        return cmd + (["--ros-args"] + args if args else [])
 
 
-def components(profile, hand=None, camera=None, calibrate=False, policy=True):
-    """Processes for a profile ("mock" or "real"), in start order. hand/camera ("mock"|"real"|None)
-    override the profile; the arm is only simulated in the mock profile (the real one runs on the NUC)."""
+def components(profile, hand=None, camera=None, oak=None, calibrate=False, policy=True):
+    """Processes for a profile ("mock" or "real"), in start order. hand/camera/oak ("mock"|"real"|None, oak
+    also "off") override the profile; the arm is only simulated in the mock profile (the real one runs on the
+    NUC)."""
     if profile not in ("mock", "real"):
         raise ValueError(f"profile must be mock or real, got {profile!r}")
-    for name, value in (("hand", hand), ("camera", camera)):
-        if value not in (None, "", "mock", "real"):
-            raise ValueError(f"{name} must be mock or real, got {value!r}")
+    for name, value, allowed in (("hand", hand, ("mock", "real")), ("camera", camera, ("mock", "real")),
+                                 ("oak", oak, ("mock", "real", "off"))):
+        if value not in (None, "", *allowed):
+            raise ValueError(f"{name} must be {' or '.join(allowed)}, got {value!r}")
     mock_hand = (hand or profile) == "mock"
     mock_camera = (camera or profile) == "mock"
+    oak = oak or profile
     out = []
     if profile == "mock":
         out.append(Component("arm", "deploy.nodes.mock_arm", "Arm (simulated)", contract.ARM_POSE))
@@ -61,6 +67,11 @@ def components(profile, hand=None, camera=None, calibrate=False, policy=True):
     out.append(Component("camera", "deploy.nodes.mock_camera" if mock_camera else "deploy.nodes.realsense_node",
                          "Camera (simulated)" if mock_camera else "Camera (RealSense)", contract.CAMERA_COLOR,
                          requires=() if mock_camera else ("pyrealsense2",)))
+    if oak == "mock":
+        out.append(Component("oak", "deploy.nodes.mock_camera", "OAK camera (simulated)", contract.OAK_COLOR,
+                             ("camera:=oak",), node_name="mock_oak"))
+    elif oak == "real":
+        out.append(Component("oak", "deploy.nodes.oak_node", "OAK camera", contract.OAK_COLOR, requires=("depthai",)))
     if policy:
         out.append(Component("policy", "deploy.nodes.policy_node", "Policy node", contract.POLICY_STATE))
     return out
@@ -76,12 +87,12 @@ def monitored(profile):
 
 
 def station_selection(env):
-    """(profile, hand, camera) for the station's Processes card from the environment (PROFILE_ENV etc.,
+    """(profile, hand, camera, oak) for the station's Processes card from the environment (PROFILE_ENV etc.,
     set by the pixi station tasks). Raises ValueError on bad values."""
     get = lambda key: (env.get(key) or "").strip().lower() or None  # noqa: E731
-    profile, hand, camera = get(PROFILE_ENV) or "mock", get(HAND_ENV), get(CAMERA_ENV)
-    components(profile, hand=hand, camera=camera)   # validates
-    return profile, hand, camera
+    profile, hand, camera, oak = get(PROFILE_ENV) or "mock", get(HAND_ENV), get(CAMERA_ENV), get(OAK_ENV)
+    components(profile, hand=hand, camera=camera, oak=oak)   # validates
+    return profile, hand, camera, oak
 
 
 def domain_refusal(profile, domain):

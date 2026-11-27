@@ -93,24 +93,41 @@
     <!-- camera -->
     <section class="card" id="camera-card" aria-labelledby="camera-h">
       <div class="card-head">
-        <h2 id="camera-h">Camera</h2>
-        <div class="segmented small" role="group" aria-label="Camera view">
+        <h2 id="camera-h">Cameras</h2>
+        <div class="segmented small" role="group" aria-label="Which camera" id="cam-which">
+          <button data-cam-which="d435" aria-pressed="true">D435</button>
+          <button data-cam-which="oak" aria-pressed="false">OAK</button>
+          <button data-cam-which="both" aria-pressed="false">Both</button>
+        </div>
+        <div class="segmented small" role="group" aria-label="Camera stream">
           <button data-cam="color" aria-pressed="true">Colour</button>
           <button data-cam="depth" aria-pressed="false">Depth</button>
           <button data-cam="both" aria-pressed="false">Both</button>
         </div>
       </div>
-      <div class="cams" data-view="color">
-        <figure data-ch="color">
-          <img id="cam-color" alt="Colour camera">
-          <figcaption><span>Colour</span><span id="cam-color-rate" class="num muted">no frames</span></figcaption>
+      <div class="cams" data-view="color" data-which="d435">
+        <figure data-src="d435" data-ch="color">
+          <img id="cam-color" alt="D435 colour">
+          <figcaption><span>D435 colour</span><span id="cam-color-rate" class="num muted">no frames</span></figcaption>
         </figure>
-        <figure data-ch="depth">
-          <img id="cam-depth" alt="Depth camera">
+        <figure data-src="d435" data-ch="depth">
+          <img id="cam-depth" alt="D435 depth">
           <figcaption>
-            <span>Depth</span>
-            <span class="depth-scale"><span id="depth-near" class="num"></span><span class="ramp"></span><span id="depth-far" class="num"></span></span>
+            <span>D435 depth</span>
+            <span class="depth-scale"><span class="num depth-near"></span><span class="ramp"></span><span class="num depth-far"></span></span>
             <span id="cam-depth-rate" class="num muted">no frames</span>
+          </figcaption>
+        </figure>
+        <figure data-src="oak" data-ch="color">
+          <img id="cam-oak_color" alt="OAK colour">
+          <figcaption><span>OAK colour</span><span id="cam-oak_color-rate" class="num muted">no frames</span></figcaption>
+        </figure>
+        <figure data-src="oak" data-ch="depth">
+          <img id="cam-oak_depth" alt="OAK depth">
+          <figcaption>
+            <span>OAK depth</span>
+            <span class="depth-scale"><span class="num depth-near"></span><span class="ramp"></span><span class="num depth-far"></span></span>
+            <span id="cam-oak_depth-rate" class="num muted">no frames</span>
           </figcaption>
         </figure>
       </div>
@@ -125,100 +142,10 @@
       </table>
     </section>
 
-    <!-- manual control -->
-    <section class="card full" id="manual-card" aria-labelledby="manual-h">
-      <div class="card-head">
-        <h2 id="manual-h">Manual control <span class="muted">(no policy needed)</span></h2>
-        <span id="manual-state" class="status" data-s="idle">off</span>
-        <button id="manual-enter" class="primary">Enter manual</button>
-        <button id="manual-exit">Exit manual</button>
-      </div>
-      <p class="hint" id="manual-hint"></p>
-      <div class="manual-body">
-        <div>
-          <div class="sub-head">
-            <h3>Hand targets (deg)</h3>
-            <button id="hand-neutral" class="small">Neutral pose</button>
-          </div>
-          <div id="sliders" class="sliders"></div>
-        </div>
-        <div>
-          <div class="sub-head">
-            <h3>Arm jog</h3>
-            <div class="segmented small" role="group" aria-label="Jog step">
-              <button data-jog-step="0.005" aria-pressed="false">0.5 cm</button>
-              <button data-jog-step="0.01" aria-pressed="true">1 cm</button>
-              <button data-jog-step="0.02" aria-pressed="false">2 cm</button>
-              <button data-jog-step="0.05" aria-pressed="false">5 cm</button>
-            </div>
-          </div>
-          <div class="jog">
-            <div class="jog-xy">
-              <span></span><button data-jog="x+" title="+x: away from the base">+x</button><span></span>
-              <button data-jog="y+" title="+y: to the base's left">+y</button>
-              <button data-jog="hold" class="small" title="Arm target = where the arm is now">Hold</button>
-              <button data-jog="y-" title="-y: to the base's right">−y</button>
-              <span></span><button data-jog="x-" title="-x: towards the base">−x</button><span></span>
-            </div>
-            <div class="jog-z">
-              <button data-jog="z+" title="up">+z</button>
-              <button data-jog="z-" title="down">−z</button>
-            </div>
-            <table class="arm-table jog-table">
-              <thead><tr><th></th><th class="r">x</th><th class="r">y</th><th class="r">z</th></tr></thead>
-              <tbody>
-                <tr><th>Target</th><td id="jog-t-x" class="r num">–</td><td id="jog-t-y" class="r num">–</td><td id="jog-t-z" class="r num">–</td></tr>
-                <tr><th>Measured</th><td id="jog-m-x" class="r num">–</td><td id="jog-m-y" class="r num">–</td><td id="jog-m-z" class="r num">–</td></tr>
-              </tbody>
-            </table>
-            <p class="hint" id="jog-dist"></p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- hand joints -->
-    <section class="card wide" id="hand-card" aria-labelledby="hand-h">
-      <div class="card-head">
-        <h2 id="hand-h">Hand joints <span class="muted">(degrees, track = range of motion)</span></h2>
-        <div class="legend" aria-hidden="true">
-          <span><i class="key dot s1"></i>Measured</span>
-          <span><i class="key tick s2"></i>Commanded</span>
-          <span><i class="key ring s3"></i>Policy target</span>
-        </div>
-      </div>
-      <p class="hint">Select a joint to plot it below.</p>
-      <div id="joints" class="joints" role="listbox" aria-label="Hand joints"></div>
-    </section>
-
-    <!-- arm -->
-    <section class="card" id="arm-card" aria-labelledby="arm-h">
-      <div class="card-head">
-        <h2 id="arm-h">Arm</h2>
-        <div class="legend" aria-hidden="true">
-          <span><i class="key dot s1"></i>Measured</span>
-          <span><i class="key tick s2"></i>Commanded</span>
-          <span><i class="key ring s3"></i>Policy</span>
-        </div>
-      </div>
-      <div class="arm-views">
-        <canvas id="arm-xy" aria-label="Arm position seen from above, inside the workspace box"></canvas>
-        <canvas id="arm-z" aria-label="Arm height inside the workspace"></canvas>
-      </div>
-      <table class="arm-table">
-        <thead><tr><th></th><th class="r">x (m)</th><th class="r">y (m)</th><th class="r">z (m)</th></tr></thead>
-        <tbody>
-          <tr><th><i class="key dot s1"></i>Measured</th><td id="arm-m-x" class="r num">–</td><td id="arm-m-y" class="r num">–</td><td id="arm-m-z" class="r num">–</td></tr>
-          <tr><th><i class="key tick s2"></i>Commanded</th><td id="arm-c-x" class="r num">–</td><td id="arm-c-y" class="r num">–</td><td id="arm-c-z" class="r num">–</td></tr>
-          <tr><th><i class="key ring s3"></i>Policy</th><td id="arm-p-x" class="r num">–</td><td id="arm-p-y" class="r num">–</td><td id="arm-p-z" class="r num">–</td></tr>
-        </tbody>
-      </table>
-    </section>
-
-    <!-- time series -->
+    <!-- policy metrics -->
     <section class="card full" id="plots-card" aria-labelledby="plots-h">
       <div class="card-head">
-        <h2 id="plots-h">History</h2>
+        <h2 id="plots-h">Policy metrics</h2>
         <div class="segmented small" role="group" aria-label="Time window">
           <button data-window="10" aria-pressed="false">10 s</button>
           <button data-window="30" aria-pressed="true">30 s</button>
@@ -226,26 +153,6 @@
         </div>
         <button id="pause" class="small" aria-pressed="false">Pause</button>
       </div>
-      <div class="legend" aria-hidden="true">
-        <span><i class="key line s1"></i>Measured</span>
-        <span><i class="key line s2"></i>Commanded</span>
-        <span><i class="key line s3"></i>Policy target</span>
-      </div>
-      <div class="plots">
-        <div class="plot-group">
-          <h3 id="joint-plot-title">Joint</h3>
-          <div class="chart" id="chart-joint"></div>
-        </div>
-        <div class="plot-group">
-          <h3>Arm position (m)</h3>
-          <div class="multiples">
-            <div class="chart" id="chart-arm-x"></div>
-            <div class="chart" id="chart-arm-y"></div>
-            <div class="chart" id="chart-arm-z"></div>
-          </div>
-        </div>
-      </div>
-      <h3>Policy metrics</h3>
       <p id="metrics-empty" class="hint">No metrics yet: they arrive while the policy node is running.</p>
       <div class="multiples metrics" id="metrics"></div>
     </section>

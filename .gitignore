@@ -48,3 +48,4 @@ datasets/
 .pixi/
 *.egg-info/
 spike_realsense.png
+raw_data/
