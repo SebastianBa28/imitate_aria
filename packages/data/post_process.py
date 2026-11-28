@@ -31,13 +31,19 @@ Output, in --out-dir/<vrs stem>/ (default output/<vrs stem>/), raw and complete 
   <vrs stem>_overlay.mp4   same frames with the tracked points drawn on, for checking (--no-overlay to skip):
                        colour per object; filled = visible with 3D, hollow = visible but no depth,
                        small red = hidden; hand skeletons: left white, right yellow
-  <vrs stem>_depth.mp4   FoundationStereo depth in the rectified left SLAM view (512x512), frame t = row t
+  <vrs stem>_depth.mp4   FoundationStereo depth in the rectified left SLAM view (768x768), frame t = row t
                        (--no-depth-video to skip): turbo colour map shaded by surface normals, red = near (DEPTH_VIS_RANGE[0]), blue = far
                        (DEPTH_VIS_RANGE[1]), black = no depth / no SLAM pair
   <vrs stem>_seg.jpg   frame 0 (frame resolution) with the Grounding DINO boxes + SAM 2 masks drawn on
 
     python post_process.py --vrs ../../raw_data/rubiks1_20261123_231401.vrs
     python post_process.py --vrs ... --stop 60        # quick test on the first frames
+    python post_process.py --vrs ... --append-to      # add it to the LeRobot dataset (default datasets/imitate-aria),
+                                                      # output folder deleted afterwards unless --keep-output
+
+--append-to [DIR] appends the recording as one episode (see dataset_io.py; creates the dataset if missing,
+skips the recording if it is already in it, never pushes: use log.py --push). Without it nothing is
+appended and the output folder is kept, for debugging; log.py --append can add that folder later.
 
 Setup: run `bash scripts/setup.sh` from the repo root once. It installs the Python environment
 with uv and puts FoundationStereo + its checkpoint in third_party/FoundationStereo, where this
@@ -52,6 +58,7 @@ import argparse
 import contextlib
 import functools
 import os
+import shutil
 import sys
 import warnings
 
@@ -60,15 +67,15 @@ import numpy as np
 import torch
 from scipy.ndimage import map_coordinates
 
+from dataset_io import DEFAULT_ROOT, EpisodeError, EpisodeWriter
+
 FS_CKPT = os.path.join("pretrained_models", "23-51-11", "model_best_bp2.pth")
 FS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "third_party", "FoundationStereo")
-PROMPTS = ["rubiks cube", "laptop"]  # objects to track (Grounding DINO text prompts), in obj_id order
+PROMPTS = ["rubiks cube", "cardboard box"]  # objects to track (Grounding DINO text prompts), in obj_id order
 N_POINTS = [250, 450]                # points sampled per object, same order as PROMPTS
 MAX_POSE_DT_NS = 50_000_000  # frames whose nearest valid VIO sample is further away get no pose
 STEREO_SIZE = 768             # rectified SLAM image side (px), at native focal length: ~115 deg FOV
 DEPTH_VIS_RANGE = (0.3, 0.8)  # m, mapped red..blue (turbo) in <stem>_depth.mp4 (farther clips to blue)
-SETTLE_WINDOW_S = 0.5          # auto start: brightness must stay steady this long...
-SETTLE_TOL = 0.02              # ...within this fraction of the frame's mean brightness
 LIFT_RADIUS = 7              # px window (2r+1)^2 around a tracked point to read its depth
 
 
@@ -116,20 +123,6 @@ def read_vrs(dp, start, stop, stride, scale):
         ts.append(rec.capture_timestamp_ns)
     print(f"read {len(frames)} frames ({frames[0].shape[1]}x{frames[0].shape[0]}) from {n} total")
     return frames, np.array(ts, dtype=np.int64)
-
-
-def auto_start(frames, rgb_ts, T_wd, window_s=SETTLE_WINDOW_S, tol=SETTLE_TOL):
-    """First sampled frame where the RGB auto-exposure has settled (mean brightness stays within tol of
-    that frame's for the next window_s seconds) and the frame has a VIO pose. The glasses take ~1-3 s to
-    adjust exposure at the start of a recording, and frames without a pose get no 3D anyway.
-    Returns (index, settle index, pose index); settle/pose index is None if never reached."""
-    b = np.array([f[::16, ::16].mean() for f in frames])
-    fps = 1e9 / np.median(np.diff(rgb_ts)) if len(rgb_ts) > 1 else 10.0
-    w = max(2, int(round(window_s * fps)))
-    settle = next((i for i in range(len(b) - w + 1)
-                   if np.abs(b[i:i + w] - b[i]).max() <= tol * max(b[i], 1.0)), None)
-    pose = next((i for i in range(len(T_wd)) if np.isfinite(T_wd[i]).all()), None)
-    return max(settle or 0, pose or 0), settle, pose
 
 
 def read_synced(dp, rgb_ts):
@@ -802,7 +795,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--vrs", required=True)
     ap.add_argument("--start", type=int, default=None,
-                    help="first RGB frame; default: auto, the first frame with settled exposure and a VIO pose")
+                    help="first RGB frame; default: auto, the first frame with a VIO pose")
     ap.add_argument("--stop", type=int, default=0, help="0 = until the end")
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--scale", type=float, default=1.0, help="downscale frames (memory/speed)")
@@ -820,11 +813,31 @@ def main():
     ap.add_argument("--no-depth-video", dest="depth_video", action="store_false",
                     help="don't write <stem>_depth.mp4 (FoundationStereo depth, turbo colour map, red = near)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--append-to", nargs="?", const=DEFAULT_ROOT, default=None, metavar="DIR",
+                    help=f"append the result to the LeRobot dataset in DIR (default {DEFAULT_ROOT}); without "
+                         "this flag nothing is appended")
+    ap.add_argument("--keep-output", action="store_true",
+                    help="with --append-to: keep <out-dir>/<vrs stem>/ (deleted after appending by default)")
     args = ap.parse_args()
     prompts = PROMPTS
     assert len(N_POINTS) == len(PROMPTS), "N_POINTS needs one count per entry in PROMPTS"
     args.vrs = os.path.abspath(args.vrs)
+    stem = os.path.splitext(os.path.basename(args.vrs))[0]
     print("device:", args.device)
+
+    writer = None
+    if args.append_to:  # check before the slow part: already in the dataset, or the settings would not fit
+        if not (args.video_width > 0 and args.overlay and args.depth_video):
+            sys.exit("--append-to needs all videos: drop --video-width 0 / --no-overlay / --no-depth-video")
+        try:
+            writer = EpisodeWriter(args.append_to)
+        except EpisodeError as e:
+            sys.exit(str(e))
+        if stem in writer:
+            print(f"{stem} is already in {args.append_to}; nothing to do")
+            return
+        if writer.objects is not None and writer.objects["n_points"] != list(N_POINTS):
+            sys.exit(f"N_POINTS {N_POINTS} differs from the dataset's {writer.objects['n_points']}")
 
     from projectaria_tools.core import data_provider
 
@@ -844,12 +857,12 @@ def main():
         slam_l, slam_r, T_world_device, session_idx = read_synced(dp, rgb_ts)
         hand_lm_device = read_hands(dp, rgb_ts)
 
-    if args.start is None:  # auto: skip the auto-exposure ramp and the frames before the first VIO pose
-        k, settle, pose = auto_start(frames, rgb_ts, T_world_device)
-        if settle is None:
-            print("  WARNING: brightness never settled; check the segmentation image")
-        print(f"  auto start at sampled frame {k} = RGB frame {k * args.stride} ({k / max(len(frames), 1):.0%} "
-              f"of the clip; exposure settled at {settle}, first pose at {pose})")
+    if args.start is None:  # auto: skip the frames before the first VIO pose (they get no 3D anyway)
+        k = next((i for i in range(len(T_world_device)) if np.isfinite(T_world_device[i]).all()), None)
+        if k is None:
+            sys.exit("no VIO pose in the clip; pass --start N")
+        print(f"  auto start at the first VIO pose: sampled frame {k} = RGB frame {k * args.stride} "
+              f"({k / max(len(frames), 1):.0%} of the clip)")
         if k >= len(frames) - 1:
             sys.exit("auto start left no frames; pass --start N")
         frames, rgb_ts, T_world_device, session_idx = frames[k:], rgb_ts[k:], T_world_device[k:], session_idx[k:]
@@ -884,8 +897,8 @@ def main():
     torch.cuda.empty_cache()
 
     print("saving results")
-    stem = os.path.splitext(os.path.basename(args.vrs))[0]
-    save_outputs(os.path.join(args.out_dir, stem), stem, args, frames, rgb_ts,
+    out_dir = os.path.join(args.out_dir, stem)
+    save_outputs(out_dir, stem, args, frames, rgb_ts,
                  T_world_device, session_idx, boxes, masks0, tracks, vis, obj_id, points_world, depth,
                  hand_lm_device, hand_uv, depth_color)
 
@@ -912,6 +925,17 @@ def main():
                     jitter = np.median(np.linalg.norm(np.nanstd(pts[:, ok], axis=0), axis=1))
         print(f"  '{p}': depth for {frac:.0%} of visible points, median depth {med:.3f} m, "
               f"median point jitter over first 1 s with 3D {'n/a' if np.isnan(jitter) else f'{jitter * 100:.1f} cm'}")
+
+    if writer is not None:
+        print(f"appending to {args.append_to}")
+        try:
+            with writer:
+                writer.add(out_dir)
+        except EpisodeError as e:
+            sys.exit(f"not appended, output kept in {out_dir}: {e}")
+        if not args.keep_output:
+            shutil.rmtree(out_dir)
+            print(f"  removed {out_dir} (pass --keep-output to keep it)")
 
 
 if __name__ == "__main__":

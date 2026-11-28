@@ -46,7 +46,11 @@ uv run python packages/data/post_process.py --vrs raw_data/demo23_nov24.vrs
 ```
 
 Useful options: `--stop N` (only the first N RGB frames, quick test),
-`--start N` (start at RGB frame N; by default the script starts where the camera's exposure has settled and the glasses have a pose, and prints which frame it picked).
+`--start N` (start at RGB frame N; by default the script starts at the first frame with a glasses (VIO) pose, about 1 s in, and prints which frame it picked),
+`--stride N` (keep every Nth frame), `--scale F` (downscale frames to save GPU memory),
+`--tracker online|offline` (CoTracker3: `online` (default) uses sliding windows, so memory doesn't grow with clip length;
+`offline` tracks better through occlusions but needs more memory), `--box-thr` (Grounding DINO box threshold, default 0.25),
+`--device` and `--fs-path` (FoundationStereo folder, default `third_party/FoundationStereo` or `$FOUNDATION_STEREO_PATH`).
 It prints, per object, the share of points with depth, the median depth and the point jitter while
 still, and writes its files to `output/<recording>/` (change the base folder with `--out-dir`):
 
@@ -69,15 +73,30 @@ Grounding DINO (Hugging Face cache) and CoTracker3 (torch hub cache).
 
 ## Build the LeRobot dataset
 
+Two ways in, both writing to `datasets/imitate-aria` (one episode per recording):
+
 ```bash
-uv run hf auth login                                   # once, token with write access
-uv run python packages/data/log.py --push              # every output/<recording>/ becomes one episode
+# straight from post-processing: append, then delete output/<recording>/ (add --keep-output to keep it)
+uv run python packages/data/post_process.py --vrs raw_data/demo23_nov24.vrs --append-to
+
+# from folders you already post-processed (e.g. after checking the overlay video)
+uv run python packages/data/log.py --append output/demo23_nov24 [more folders...]
+uv run python packages/data/log.py --overwrite          # rebuild from every output/<recording>/
+
+uv run hf auth login                                    # once, token with write access
+uv run python packages/data/log.py --push               # upload to SebastianBa28/imitate-aria (private; --public to change)
 ```
 
-Builds `datasets/imitate-aria` locally and uploads it to `SebastianBa28/imitate-aria` (private; add
-`--public` to change). Without `--push` it only builds locally; `--overwrite` rebuilds an existing local copy.
-All recordings must share the same `--stride` (fps), `--video-width` and prompts (`PROMPTS` in `post_process.py`). Per frame it stores the RGB
-video, `observation.state` (right-hand 5 fingertips), `observation.object_points`, `action` (fingertips at
+Without `--append-to`, `post_process.py` only writes `output/<recording>/` (debugging). `--append-to` takes an
+optional folder (default `datasets/imitate-aria`), creates the dataset if it doesn't exist, and skips a recording
+that is already in it (listed in `meta/sources.json`), so re-running is safe. It never pushes, and it refuses
+`--video-width 0`, `--no-overlay` and `--no-depth-video` (the dataset stores all three videos).
+
+The first episode fixes fps (`--stride`), video sizes (`--video-width`), objects (`PROMPTS`) and point counts
+(`N_POINTS`); later recordings with different settings are refused. Changing one of them means rebuilding:
+delete the dataset and re-run. Per frame it stores the RGB
+video, `observation.state` (right hand: 5 fingertips, wrist, index and pinky knuckles, 24 values), `observation.object_points`, `action` (the same joints at
 the next frame) and `*_valid` flags (missing values are 0, never filled), all in each recording's VIO world
-frame. Which object each point belongs to is in `meta/objects.json`. The overlay and depth videos are uploaded too, as
-`debug.overlay` and `debug.depth` (for viewing only, not policy inputs).
+frame. Each object owns a fixed block of point slots (`meta/objects.json`); slots a recording could not fill
+are invalid. The overlay and depth videos are stored too, as `debug.overlay` and `debug.depth` (for viewing
+only, not policy inputs).
