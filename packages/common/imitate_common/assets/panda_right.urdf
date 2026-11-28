@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!-- Franka Panda (right arm), kinematics only: joints and limits from the controller's /paco/robot_description
+     (multipanda_ros2 on the NUC, franka_description robots/real/panda_arm.urdf.xacro, read 2026-11-28).
+     Meshes and collision shapes removed. right_link8 is the flange: the controller's
+     /right/arm/end_effector_pose is this frame (checked against the measured pose: < 0.01 mm). -->
+<robot name="panda_right">
+  <link name="world"/>
+  <link name="right_link0"/>
+  <link name="right_link1"/>
+  <link name="right_link2"/>
+  <link name="right_link3"/>
+  <link name="right_link4"/>
+  <link name="right_link5"/>
+  <link name="right_link6"/>
+  <link name="right_link7"/>
+  <link name="right_link8"/>
+  <joint name="right_joint_world" type="fixed">
+    <parent link="world"/>
+    <child link="right_link0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <joint name="right_joint1" type="revolute">
+    <parent link="right_link0"/>
+    <child link="right_link1"/>
+    <origin xyz="0 0 0.333" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.1750"/>
+  </joint>
+  <joint name="right_joint2" type="revolute">
+    <parent link="right_link1"/>
+    <child link="right_link2"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.7628" upper="1.7628" effort="87" velocity="2.1750"/>
+  </joint>
+  <joint name="right_joint3" type="revolute">
+    <parent link="right_link2"/>
+    <child link="right_link3"/>
+    <origin xyz="0 -0.316 0" rpy="1.5707963267948966 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="87" velocity="2.1750"/>
+  </joint>
+  <joint name="right_joint4" type="revolute">
+    <parent link="right_link3"/>
+    <child link="right_link4"/>
+    <origin xyz="0.0825 0 0" rpy="1.5707963267948966 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.0718" upper="-0.0698" effort="87" velocity="2.1750"/>
+  </joint>
+  <joint name="right_joint5" type="revolute">
+    <parent link="right_link4"/>
+    <child link="right_link5"/>
+    <origin xyz="-0.0825 0.384 0" rpy="-1.5707963267948966 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.6100"/>
+  </joint>
+  <joint name="right_joint6" type="revolute">
+    <parent link="right_link5"/>
+    <child link="right_link6"/>
+    <origin xyz="0 0 0" rpy="1.5707963267948966 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.0175" upper="3.7525" effort="12" velocity="2.6100"/>
+  </joint>
+  <joint name="right_joint7" type="revolute">
+    <parent link="right_link6"/>
+    <child link="right_link7"/>
+    <origin xyz="0.088 0 0" rpy="1.5707963267948966 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.8973" upper="2.8973" effort="12" velocity="2.6100"/>
+  </joint>
+  <joint name="right_joint8" type="fixed">
+    <parent link="right_link7"/>
+    <child link="right_link8"/>
+    <origin xyz="0 0 0.107" rpy="0 0 0"/>
+  </joint>
+</robot>

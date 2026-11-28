@@ -1,6 +1,7 @@
 // Station dashboard. Talks to deploy.station.server:
 //   GET /api/config, POST /api/command, POST /api/process, WS /ws (JSON snapshot/tick + binary JPEG: 1 byte channel, then the image)
 import { TimeChart, cssColor, fmt } from "./chart.js";
+import { SkeletonView, boxLines, chainFrames, dist, gridLines, pos, prepareChain, zAxis } from "./skeleton.js";
 
 const $ = (id) => document.getElementById(id);
 const DEG = 180 / Math.PI;
@@ -37,6 +38,7 @@ const state = {
   logSel: null,
   logDirty: true,
   procPending: new Set(),    // process names (or "all") with a request in flight
+  robot: null,               // skeleton views, chains and derived-series cursors (buildRobot)
 };
 const LOG_KEEP = 500;
 
@@ -437,6 +439,265 @@ function drawCharts() {
   state.charts.metrics.forEach(({ chart }) => chart.draw(now, w));
 }
 
+
+// --- robot skeletons ------------------------------------------------------------------------
+const FINGERS = ["thumb", "index", "middle", "ring", "pinky"];
+const TRAIL_S = 3;          // end-effector trails
+const LAG_SEARCH_S = 3;     // how far back the lag estimate looks for the command matching the arm's position
+const PREVIEW_MAX_AGE_S = 1;
+
+// last sample at or before t (binary search), or null
+function sampleAt(s, t) {
+  if (!s || !s.t.length) return null;
+  let lo = 0, hi = s.t.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (s.t[mid] <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return ans < 0 ? null : { t: s.t[ans], v: s.v[ans] };
+}
+
+function trail(name, sinceT) {
+  const s = series(name);
+  if (!s) return [];
+  const out = [];
+  for (let i = s.t.length - 1; i >= 0 && s.t[i] >= sinceT; i--) if (s.v[i][0] !== null) out.push(s.v[i]);
+  return out.reverse();
+}
+
+const finite = (v) => v && v.every((x) => x !== null && Number.isFinite(x));
+
+function armFrames(q) {
+  return q ? chainFrames(state.robot.armChain, q) : null;
+}
+
+// fingertip positions (5 x [x,y,z]) and the polyline of each finger, palm frame; null if q is incomplete
+function handPose(q) {
+  if (!q) return null;
+  const fingers = {};
+  for (const f of FINGERS) {
+    const frames = chainFrames(state.robot.fingers[f], q);
+    if (!frames) return null;
+    fingers[f] = frames.slice(0, -1).map(pos);   // joint locations, ending at the fixed fingertip frame
+  }
+  return { fingers, tips: FINGERS.map((f) => fingers[f][fingers[f].length - 1]) };
+}
+
+function pushDerived(name, t, v) {
+  let s = state.series.get(name);
+  if (!s) { s = { t: [], v: [] }; state.series.set(name, s); }
+  s.t.push(t); s.v.push([v]);
+  const keep = state.config ? state.config.history_s : 60;
+  let drop = 0;
+  while (drop < s.t.length && s.t[drop] < t - keep) drop++;
+  if (drop) { s.t.splice(0, drop); s.v.splice(0, drop); }
+}
+
+// tracking errors as series, sampled at each measurement against the command in force at that moment
+function updateDerived() {
+  const r = state.robot;
+  if (!r) return;
+  const meas = series("arm.pos"), cmd = series("arm.cmd");
+  if (meas && cmd) {
+    for (let i = 0; i < meas.t.length; i++) {
+      if (meas.t[i] <= r.cursor.arm) continue;
+      const c = sampleAt(cmd, meas.t[i]);
+      if (c && finite(c.v) && finite(meas.v[i])) pushDerived("derived.arm_err", meas.t[i], dist(c.v, meas.v[i]));
+      r.cursor.arm = meas.t[i];
+    }
+  }
+  const hq = series("hand.q"), hc = series("hand.cmd");
+  if (hq && hc) {
+    let lastCmd = null, lastPose = null;
+    for (let i = 0; i < hq.t.length; i++) {
+      if (hq.t[i] <= r.cursor.hand) continue;
+      r.cursor.hand = hq.t[i];
+      const c = sampleAt(hc, hq.t[i]);
+      if (!c) continue;
+      if (!lastCmd || c.t !== lastCmd.t) { lastCmd = c; lastPose = handPose(c.v); }   // FK once per command
+      const a = handPose(hq.v[i]);
+      if (!a || !lastPose) continue;
+      pushDerived("derived.hand_err", hq.t[i], a.tips.reduce((sum, p, k) => sum + dist(p, lastPose.tips[k]), 0) / 5);
+    }
+  }
+}
+
+function resetDerived() {
+  if (!state.robot) return;
+  state.robot.cursor = { arm: -Infinity, hand: -Infinity };
+  state.series.delete("derived.arm_err");
+  state.series.delete("derived.hand_err");
+}
+
+// how long ago the command was where the arm is now; null if not moving or no match
+function armLag(measured, tNow) {
+  const cmd = series("arm.cmd");
+  if (!cmd || !measured) return null;
+  let best = null, bestD = Infinity, moved = 0, prev = null;
+  for (let i = cmd.t.length - 1; i >= 0 && cmd.t[i] >= tNow - LAG_SEARCH_S; i--) {
+    const v = cmd.v[i];
+    if (!finite(v)) continue;
+    if (prev) moved += dist(prev, v);
+    prev = v;
+    const d = dist(v, measured);
+    if (d < bestD) { bestD = d; best = cmd.t[i]; }
+  }
+  if (best === null || moved < 0.003) return null;             // commands not moving: nothing to lag behind
+  if (bestD > 0.003) return { behind: true };                     // further behind than the search window or off-path
+  return { s: Math.max(0, tNow - best) };
+}
+
+function buildRobot() {
+  const k = state.config.kinematics;
+  if (!k) return;
+  const fingers = Object.fromEntries(FINGERS.map((f) => [f, prepareChain(k.hand.fingers[f])]));
+  state.robot = { armChain: prepareChain(k.arm.chain), fingers, cursor: { arm: -Infinity, hand: -Infinity } };
+
+  // hand bounds: open (zero), neutral, closed (upper limits) and halfway poses, plus a margin. Not the lower
+  // limits: they bend every finger backwards at once, which would leave the usual poses small in the view.
+  const lo = state.config.joint_lower, hi = state.config.joint_upper;
+  const pts = [];
+  for (const q of [hi, state.config.hand_neutral, lo.map((x, i) => (x + hi[i]) / 2), lo.map(() => 0)]) {
+    const p = handPose(q);
+    if (p) for (const f of FINGERS) pts.push(...p.fingers[f]);
+  }
+  pts.push([0, 0, 0]);
+  const hb = [0, 1, 2].map((a) => {
+    const v = pts.map((p) => p[a]);
+    const mn = Math.min(...v), mx = Math.max(...v), m = (mx - mn) * 0.08 + 0.005;
+    return [mn - m, mx + m];
+  });
+  state.robot.hand = new SkeletonView($("hand-view"), { bounds: hb, yaw: Math.PI + 0.3, pitch: 0.15 });
+
+  const ws = state.config.arm.workspace;
+  const ab = [[Math.min(-0.1, ws.x[0]), Math.max(0.75, ws.x[1])], [Math.min(-0.4, ws.y[0]), Math.max(0.4, ws.y[1])],
+              [0, Math.max(0.85, ws.z[1])]];
+  state.robot.armBounds = ab;
+  state.robot.arm = new SkeletonView($("arm-view"), { bounds: ab, yaw: -0.55, pitch: 0.35 });
+  state.robot.grid = gridLines([-0.2, ab[0][1]], ab[1], 0.1);
+  state.robot.workspace = boxLines(ws);
+
+  state.robot.armChart = new TimeChart($("arm-err-chart"), {
+    title: "Cmd − measured", unit: "mm", digits: 1, minSpan: 5,
+    series: [{ label: "cmd − measured", color: "var(--s2)", scale: 1000, get: () => series("derived.arm_err") }],
+  });
+  state.robot.handChart = new TimeChart($("hand-err-chart"), {
+    title: "Fingertip error (mean)", unit: "mm", digits: 1, minSpan: 5,
+    series: [{ label: "fingertip error", color: "var(--s2)", scale: 1000, get: () => series("derived.hand_err") }],
+  });
+}
+
+const ageText = (t) => {
+  if (t === null || t === undefined) return "never";
+  const a = serverNow() - t;
+  return a < 1 ? `${Math.round(a * 1000)} ms ago` : a < 120 ? `${a.toFixed(1)} s ago` : `${Math.round(a / 60)} min ago`;
+};
+const lastT = (name) => latest(name)?.t ?? null;
+
+function drawArm() {
+  const r = state.robot;
+  const q = latest("arm.q"), m = latest("arm.pos"), c = latest("arm.cmd"), p = latest("policy.arm");
+  const now = serverNow();
+  const previewOn = state.policy.mode === "preview" && p && now - p.t < PREVIEW_MAX_AGE_S;
+  const key = [q?.t, m?.t, c?.t, previewOn && p.t, state.connected, Math.floor(now)].join();
+  if (!r.arm.needs(key)) return;
+
+  const lines = [
+    ...r.grid.map((pts) => ({ pts, color: "var(--grid)", width: 1 })),
+    ...r.workspace.map((pts) => ({ pts, color: "var(--axis)", width: 1, dash: [4, 4] })),
+  ];
+  const dots = [{ p: [0, 0, 0], color: "var(--muted)", r: 4, label: "base", labelColor: "var(--muted)" }];
+  const frames = armFrames(q && q.v);
+  let ee = null;
+  if (frames) {
+    const pts = [];
+    for (const T of frames) {
+      const pt = pos(T);
+      if (!pts.length || dist(pts[pts.length - 1], pt) > 1e-6) pts.push(pt);
+    }
+    lines.push({ pts, color: "var(--s1)", width: 5, alpha: 0.85 });
+    for (const pt of pts.slice(1, -1)) dots.push({ p: pt, color: "var(--surface)", r: 2.5 });
+    const T = frames[frames.length - 1];
+    ee = pos(T);
+    const z = zAxis(T);
+    lines.push({ pts: [ee, [ee[0] + 0.06 * z[0], ee[1] + 0.06 * z[1], ee[2] + 0.06 * z[2]]], color: "var(--s1)", width: 2 });
+  } else if (m && finite(m.v)) {
+    ee = m.v;   // no joint angles: the end effector alone
+  }
+  lines.push({ pts: trail("arm.pos", now - TRAIL_S), color: "var(--s1)", width: 1.5, alpha: 0.6 });
+  if (c && finite(c.v)) {
+    lines.push({ pts: trail("arm.cmd", now - TRAIL_S), color: "var(--s2)", width: 1.5, alpha: 0.7, dash: [3, 3] });
+    if (ee) lines.push({ pts: [ee, c.v], color: "var(--s2)", width: 1.5, dash: [2, 3] });
+  }
+  if (ee) dots.push({ p: ee, color: "var(--s1)", r: 5, label: frames ? "end effector" : "end effector (no joint data)", labelDy: 10 });
+  if (c && finite(c.v)) dots.push({ p: c.v, color: "var(--s2)", r: 6, ring: true, label: "commanded", labelDy: -10 });
+  if (previewOn && finite(p.v)) dots.push({ p: p.v, color: "var(--s3)", r: 6, ring: true, label: "policy", labelDy: -10 });
+  r.arm.draw({ lines, dots }, key);
+
+  // readouts
+  const measured = m && finite(m.v) ? m.v : ee;
+  $("arm-err").textContent = c && finite(c.v) && measured ? `${(dist(c.v, measured) * 1000).toFixed(1)} mm` : "–";
+  const lag = c && measured ? armLag(measured, m ? m.t : now) : null;
+  $("arm-lag").textContent = !c ? "–" : !lag ? "settled" : lag.behind ? "> 3 s / off path" : `${Math.round(lag.s * 1000)} ms`;
+  $("arm-cmd-age").textContent = ageText(c?.t);
+  $("arm-hint").textContent = !q && !m ? "No arm data: is the arm controller (or the simulated arm) running?"
+    : !q ? `No joint angles on ${state.config.kinematics.arm.topic}: showing the end effector only.`
+    : !c ? "No commands yet: they are sent in Live (policy) or manual mode. Drag to rotate, double-click to reset."
+    : "Drag to rotate, double-click to reset.";
+}
+
+function drawHand() {
+  const r = state.robot;
+  const a = latest("hand.q"), c = latest("hand.cmd"), p = latest("policy.hand");
+  const now = serverNow();
+  const previewOn = state.policy.mode === "preview" && p && now - p.t < PREVIEW_MAX_AGE_S;
+  const key = [a?.t, c?.t, previewOn && p.t, state.connected, Math.floor(now)].join();
+  if (!r.hand.needs(key)) return;
+
+  const lines = [], dots = [];
+  const add = (pose, color, width, alpha, dash, tipLabels) => {
+    if (!pose) return;
+    const f = pose.fingers;
+    const palm = [[0, 0, 0], f.thumb[0], f.index[0], f.middle[0], f.ring[0], f.pinky[0], [0, 0, 0]];
+    lines.push({ pts: palm, color, width: Math.max(1, width - 1.5), alpha: alpha * 0.7, dash });
+    for (const name of FINGERS) {
+      lines.push({ pts: f[name], color, width, alpha, dash });
+      const tip = f[name][f[name].length - 1];
+      dots.push({ p: tip, color, r: width > 2.5 ? 3.5 : 2.5, label: tipLabels && name === "thumb" ? "thumb" : "",
+                  labelColor: "var(--muted)" });
+    }
+  };
+  const cmdPose = c ? handPose(c.v) : null, achieved = a ? handPose(a.v) : null;
+  add(previewOn ? handPose(p.v) : null, "var(--s3)", 2, 0.9, [4, 3], false);
+  add(cmdPose, "var(--s2)", 2, 0.9, [], false);
+  add(achieved, "var(--s1)", 3.5, 1, [], true);
+  r.hand.draw({ lines, dots }, key);
+
+  if (achieved && cmdPose) {
+    const d = achieved.tips.map((t, k) => dist(t, cmdPose.tips[k]));
+    $("hand-err").textContent = `${(d.reduce((x, y) => x + y, 0) / 5 * 1000).toFixed(1)} mm (max ${(Math.max(...d) * 1000).toFixed(1)})`;
+    let worst = -1, worstErr = 0;
+    a.v.forEach((x, i) => {
+      const y = c.v[i];
+      if (x !== null && y !== null && Math.abs(x - y) > worstErr) { worstErr = Math.abs(x - y); worst = i; }
+    });
+    $("hand-jerr").textContent = worst < 0 ? "–" : `${(worstErr * DEG).toFixed(1)}° ${state.config.joint_names[worst]}`;
+  } else {
+    $("hand-err").textContent = "–";
+    $("hand-jerr").textContent = "–";
+  }
+  $("hand-cmd-age").textContent = ageText(c?.t);
+}
+
+function drawRobot() {
+  if (!state.robot) return;
+  drawArm();
+  drawHand();
+  const now = state.paused ? state.pausedAt : serverNow();
+  state.robot.armChart.draw(now, 10);
+  state.robot.handChart.draw(now, 10);
+}
+
 // --- camera ---------------------------------------------------------------------------------
 function onFrame(buf) {
   const bytes = new Uint8Array(buf);
@@ -510,6 +771,8 @@ function connect() {
       state.series.clear();
       state.meta = m.series_meta;
       addSeries(m.series);
+      resetDerived();
+      updateDerived();
       state.connected = true;
       state.lastTick = Date.now();
       state.procs = m.processes || [];
@@ -525,6 +788,7 @@ function connect() {
     state.connected = true;
     state.meta = m.series_meta;
     addSeries(m.series);
+    updateDerived();
     state.health = m.health;
     state.policy = m.policy || {};
     state.procs = m.processes || [];
@@ -559,6 +823,7 @@ function frame(ts) {
       renderCameraRates();
     }
     drawCharts();
+    drawRobot();
   }
   requestAnimationFrame(frame);
 }
@@ -586,6 +851,7 @@ async function main() {
     document.querySelector(".cams").dataset.which = "d435";
   }
   buildProcesses();
+  buildRobot();
   connect();
   requestAnimationFrame(frame);
 }

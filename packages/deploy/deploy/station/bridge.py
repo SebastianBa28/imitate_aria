@@ -41,6 +41,7 @@ class StationBridge(Node):
         names = list(hand.JOINT_NAMES)
         for key, unit in (("hand.q", "rad"), ("hand.qd", "rad/s"), ("hand.cmd", "rad"), ("policy.hand", "rad")):
             store.define(key, hand.NUM_JOINTS, names, unit)
+        store.define("arm.q", len(contract.ARM_JOINT_NAMES), list(contract.ARM_JOINT_NAMES), "rad")
         for key in ("arm.pos", "arm.cmd", "policy.arm"):
             store.define(key, 3, ["x", "y", "z"], "m")
         for key in ("arm.quat", "arm.cmd_quat"):
@@ -61,6 +62,7 @@ class StationBridge(Node):
         self.create_subscription(JointState, contract.POLICY_ACTION_HAND,
                                  self.joints_to("policy.hand", contract.POLICY_ACTION_HAND), 10)
         self.create_subscription(PoseStamped, contract.ARM_POSE, self.on_arm, 10)
+        self.create_subscription(JointState, contract.ARM_JOINT_STATE, self.on_arm_joints, 10)
         self.create_subscription(PoseStamped, contract.ARM_POSE_CMD, self.on_arm_cmd, 10)
         self.create_subscription(PoseStamped, contract.POLICY_ACTION_ARM, self.on_policy_arm, 10)
         self.create_subscription(String, contract.POLICY_METRICS, self.on_metrics, 10)
@@ -97,6 +99,12 @@ class StationBridge(Node):
         pos, quat = pose_from_msg(msg)
         self.store.add("arm.pos", t, pos)
         self.store.add("arm.quat", t, quat)
+
+    def on_arm_joints(self, msg):
+        t = time.time()
+        self.health.tick(contract.ARM_JOINT_STATE, t)
+        pos = dict(zip(msg.name, msg.position))
+        self.store.add("arm.q", t, [pos.get(n, np.nan) for n in contract.ARM_JOINT_NAMES])
 
     def on_arm_cmd(self, msg):
         t = time.time()

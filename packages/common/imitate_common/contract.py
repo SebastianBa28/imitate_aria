@@ -14,6 +14,10 @@ HAND_TORQUE = "/right/hand/set_torque"      # std_srvs/SetBool
 ARM_POSE = "/right/arm/end_effector_pose"
 ARM_POSE_CMD = "/right/arm/end_effector_pose_cmd"
 ARM_FRAME = "world"
+# arm joints (sensor_msgs/JointState, rad), published by the controller's joint_state_broadcaster (~30 Hz).
+# Match by name: /paco/franka/joint_states has the same values in another order.
+ARM_JOINT_STATE = "/paco/joint_states"
+ARM_JOINT_NAMES = tuple(f"right_joint{i}" for i in range(1, 8))
 
 # camera (RealSense D435)
 CAMERA_COLOR = "/camera/color/image_raw"           # sensor_msgs/Image rgb8

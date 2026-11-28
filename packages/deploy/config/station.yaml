@@ -59,6 +59,7 @@ station:
   expected_hz:
     /right/hand/joint_states: 100
     /right/arm/end_effector_pose: 30   # multipanda_ros2 publishes ~30 Hz (measured with spike-ping arm)
+    /paco/joint_states: 30             # arm joints, same controller (measured 30 Hz)
     /camera/color/image_raw: 30
     /camera/depth/image_raw: 30
     /oak/color/image_raw: 30

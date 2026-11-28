@@ -45,6 +45,9 @@ from deploy.station.camera import DEPTH_RANGE_MM, CameraEncoder
 from deploy.station.monitor import HealthBoard
 from deploy.station.supervisor import Spec, Supervisor
 from imitate_common import contract, hand
+from imitate_common.arm_kinematics import Panda
+from imitate_common.orca_kinematics import FINGERS, OrcaHand
+from imitate_common.urdf import chain_json
 
 CONF = cfg.load()
 SC = CONF["station"]
@@ -60,6 +63,28 @@ LOG_SNAPSHOT_LINES, LOG_TICK_LINES = 300, 200
 # health lights: drop the OAK's topics when it is switched off (IMITATE_STATION_OAK=off), not "missing" forever
 EXPECTED_HZ = {t: hz for t, hz in SC["expected_hz"].items()
                if "oak" in COMPONENTS or t not in (contract.OAK_COLOR, contract.OAK_DEPTH)}
+
+
+def kinematics():
+    """Joint chains for the dashboard's skeleton views (FK runs in the browser, web/skeleton.js)."""
+    orca = OrcaHand()
+    fingers = {}
+    for f in FINGERS:
+        joints = chain_json(orca.chain[f])
+        for j in joints:
+            j["q"] = orca.joint_index.get(j["name"], -1) if j["type"] == "revolute" else -1
+        fingers[f] = joints
+    arm = chain_json(Panda().chain)   # revolute joints are contract.ARM_JOINT_NAMES, in order (checked by Panda)
+    k = 0
+    for j in arm:
+        j["q"] = k if j["type"] == "revolute" else -1
+        k += j["type"] == "revolute"
+    return {"arm": {"chain": arm, "joint_names": list(contract.ARM_JOINT_NAMES), "frame": contract.ARM_FRAME,
+                    "topic": contract.ARM_JOINT_STATE},
+            "hand": {"fingers": fingers, "frame": "palm"}}
+
+
+KINEMATICS = kinematics()
 
 
 class State:
@@ -191,6 +216,7 @@ def get_config():
         "oak": ({"width": CONF["oak"]["width"], "height": CONF["oak"]["height"], "fps": CONF["oak"]["fps"]}
                 if "oak" in COMPONENTS else None),
         "channels": list(CHANNELS),
+        "kinematics": KINEMATICS,
         "robot_assets": ROBOT_ASSETS.exists(),
         "processes": {"profile": PROFILE, "domain": DOMAIN, "refusal": domain_refusal(PROFILE, DOMAIN),
                       "components": [{"name": c.name, "title": c.title, "label": c.label, "topic": c.topic,

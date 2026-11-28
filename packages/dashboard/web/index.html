@@ -90,6 +90,15 @@
       <p id="cmd-result" class="cmd-result" aria-live="polite"></p>
     </section>
 
+    <!-- health -->
+    <section class="card" id="health-card" aria-labelledby="health-h">
+      <h2 id="health-h">Topic health</h2>
+      <table class="health">
+        <thead><tr><th>Topic</th><th>Status</th><th class="r">Rate</th><th class="r">Age</th></tr></thead>
+        <tbody id="health-body"></tbody>
+      </table>
+    </section>
+
     <!-- camera -->
     <section class="card" id="camera-card" aria-labelledby="camera-h">
       <div class="card-head">
@@ -133,13 +142,43 @@
       </div>
     </section>
 
-    <!-- health -->
-    <section class="card" id="health-card" aria-labelledby="health-h">
-      <h2 id="health-h">Topic health</h2>
-      <table class="health">
-        <thead><tr><th>Topic</th><th>Status</th><th class="r">Rate</th><th class="r">Age</th></tr></thead>
-        <tbody id="health-body"></tbody>
-      </table>
+    <!-- robot skeletons (web/skeleton.js): FK in the browser from the URDF chains in /api/config -->
+    <section class="card" id="arm-card" aria-labelledby="arm-h">
+      <div class="card-head">
+        <h2 id="arm-h">Arm</h2>
+        <span class="legend">
+          <span><i style="--k: var(--s1)"></i>measured</span>
+          <span><i style="--k: var(--s2)"></i>commanded</span>
+          <span><i style="--k: var(--s3)"></i>policy (preview)</span>
+        </span>
+      </div>
+      <canvas id="arm-view" class="skel" aria-label="Arm skeleton from the joint angles, with the commanded end-effector position"></canvas>
+      <dl class="readout">
+        <div><dt>Cmd − measured</dt><dd id="arm-err" class="num">–</dd></div>
+        <div><dt>Lag</dt><dd id="arm-lag" class="num" title="How long ago the arm's command was where the arm is now (searches the last 3 s of commands)">–</dd></div>
+        <div><dt>Last command</dt><dd id="arm-cmd-age" class="num">–</dd></div>
+      </dl>
+      <div class="chart small" id="arm-err-chart"></div>
+      <p class="hint" id="arm-hint">Drag to rotate, double-click to reset.</p>
+    </section>
+
+    <section class="card" id="hand-card" aria-labelledby="hand-h">
+      <div class="card-head">
+        <h2 id="hand-h">Hand</h2>
+        <span class="legend">
+          <span><i style="--k: var(--s1)"></i>achieved</span>
+          <span><i style="--k: var(--s2)"></i>commanded</span>
+          <span><i style="--k: var(--s3)"></i>policy (preview)</span>
+        </span>
+      </div>
+      <canvas id="hand-view" class="skel" aria-label="Hand skeleton: achieved and commanded joint angles"></canvas>
+      <dl class="readout">
+        <div><dt>Fingertip error</dt><dd id="hand-err" class="num">–</dd></div>
+        <div><dt>Largest joint error</dt><dd id="hand-jerr" class="num">–</dd></div>
+        <div><dt>Last command</dt><dd id="hand-cmd-age" class="num">–</dd></div>
+      </dl>
+      <div class="chart small" id="hand-err-chart"></div>
+      <p class="hint">Palm frame, fingers up. Drag to rotate, double-click to reset.</p>
     </section>
 
     <!-- policy metrics -->

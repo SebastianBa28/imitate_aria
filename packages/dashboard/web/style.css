@@ -125,8 +125,22 @@ h3 { font-size: 13px; margin: 14px 0 6px; font-weight: 600; color: var(--ink-2);
 /* --- layout ----------------------------------------------------------------------------- */
 .grid {
   display: grid; gap: 12px; padding: 12px 16px 24px;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr) minmax(280px, 380px);
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr) minmax(320px, 420px);
+  grid-template-areas:
+    "proc   proc   proc"
+    "policy camera arm"
+    "health camera hand"
+    "plots  plots  plots"
+    "events events events";
 }
+#proc-card { grid-area: proc; }
+#policy-card { grid-area: policy; }
+#health-card { grid-area: health; }
+#camera-card { grid-area: camera; }
+#arm-card { grid-area: arm; }
+#hand-card { grid-area: hand; }
+#plots-card { grid-area: plots; }
+#events-card { grid-area: events; }
 .card {
   background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
   padding: 14px 16px; min-width: 0;
@@ -136,13 +150,16 @@ h3 { font-size: 13px; margin: 14px 0 6px; font-weight: 600; color: var(--ink-2);
 .card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
 .card-head h2 { margin: 0; flex: 1; min-width: 0; }
 @media (max-width: 1100px) {
-  .grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  #camera-card { grid-column: 1 / -1; grid-row: 1; }
-  .card.wide { grid-column: 1 / -1; }
+  .grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas: "proc proc" "camera camera" "policy arm" "health hand" "plots plots" "events events";
+  }
 }
 @media (max-width: 700px) {
-  .grid { grid-template-columns: minmax(0, 1fr); padding: 12px 16px; }
-  .card.wide, .card.full, #camera-card { grid-column: auto; }
+  .grid {
+    grid-template-columns: minmax(0, 1fr); padding: 12px 16px;
+    grid-template-areas: "proc" "policy" "camera" "arm" "hand" "health" "plots" "events";
+  }
   .estop { margin-left: 0; width: 100%; }
 }
 
@@ -286,3 +303,27 @@ body.offline .grid { opacity: 0.55; }
 .status[data-s="stopped"]::before, .status[data-s="unknown"]::before { background: transparent; border: 1.5px solid var(--muted); }
 code { font: 12px var(--mono); }
 #proc-card[data-profile="real"] #proc-profile { color: var(--serious); font-weight: 600; }
+
+/* --- left column: policy + health stacked, kept compact ------------------------------------ */
+#policy-card h3 { margin-top: 10px; }
+#policy-card .controls { margin: 8px 0 2px; }
+#policy-card .mode-row { margin-top: 8px; }
+#health-card table { font-size: 12px; }
+#health-card th, #health-card td { padding: 2px 4px; }
+#health-card .health td:first-child { font-size: 11px; }
+
+/* --- robot skeletons (skeleton.js) ---------------------------------------------------------- */
+.skel {
+  display: block; width: 100%; height: 290px; touch-action: none; cursor: grab;
+  background: var(--surface-2); border-radius: 6px;
+}
+.skel:active { cursor: grabbing; }
+#hand-card .skel { height: 330px; }
+.legend { display: inline-flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.legend i { width: 14px; height: 3px; border-radius: 2px; background: var(--k); }
+.readout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0 4px; }
+.readout div { min-width: 0; }
+.readout dt { font-size: 11px; color: var(--muted); }
+.readout dd { margin: 0; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chart.small { height: 80px; }
