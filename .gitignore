@@ -43,7 +43,6 @@ third_party/
 # local LeRobot datasets built by packages/data/log.py
 datasets/
 
-CLAUDE.md 
 
 # raw recordings (Aria .vrs in raw_data/wild, in-scene camera folders in raw_data/scene)
 raw_data/
