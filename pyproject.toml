@@ -32,6 +32,10 @@ dependencies = [
     "open3d",
     # LeRobot dataset building + upload (packages/data/log.py)
     "lerobot[dataset]>=0.7",
+    # in-scene hand pose (packages/data/scene_process.py): WiLoR (HaMeR-style MANO regressor + YOLO hand
+    # detector). Its pinned requirements are replaced by [[tool.uv.dependency-metadata]] below.
+    "wilor-mini @ git+https://github.com/warmshao/WiLoR-mini@ebec42f94c389070cdd7dda6fd1bf0b4a659c960",
+    "smplx==0.1.28",
 ]
 
 [tool.uv]
@@ -39,6 +43,15 @@ package = false  # standalone scripts, not an installable package
 # lerobot pulls opencv-python-headless, which clashes with opencv-python:
 # never install the headless build; opencv-python provides the same cv2 module.
 override-dependencies = ["opencv-python-headless; sys_platform == 'never'"]
+
+# wilor-mini's own requirements pin torch<=2.5, ultralytics==8.1.34 and chumpy (which does not build on
+# Python 3.12 / numpy 2; it is only needed to unpickle the MANO file, aina/hands_wilor.py shims it).
+# Declare its dependencies here instead, so uv never reads (or builds) its requirements.
+[[tool.uv.dependency-metadata]]
+name = "wilor-mini"
+version = "1.1"
+requires-dist = ["torch", "torchvision", "smplx==0.1.28", "timm", "einops", "ultralytics", "opencv-python",
+                 "huggingface-hub", "scikit-image", "roma"]
 
 # CUDA 12.8 builds of torch / torchvision; everything else comes from PyPI
 [[tool.uv.index]]

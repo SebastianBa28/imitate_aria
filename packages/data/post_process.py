@@ -56,7 +56,6 @@ is NaN, never zero.
 """
 import argparse
 import contextlib
-import functools
 import os
 import shutil
 import sys
@@ -67,16 +66,20 @@ import numpy as np
 import torch
 from scipy.ndimage import map_coordinates
 
+from aina.config import LIFT_RADIUS, N_POINTS, PROMPTS
+from aina.geometry import as_matrix, unit
+from aina.hands import HANDS, WRIST_KEYPOINTS, wrist_poses
+from aina.lift import lift_points
+from aina.overlay import draw_overlay
+from aina.segment import boxes_grounding_dino, draw_segmentation, masks_sam2
+from aina.track import track_points
 from dataset_io import DEFAULT_ROOT, EpisodeError, EpisodeWriter
 
 FS_CKPT = os.path.join("pretrained_models", "23-51-11", "model_best_bp2.pth")
 FS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "third_party", "FoundationStereo")
-PROMPTS = ["rubiks cube", "cardboard box"]  # objects to track (Grounding DINO text prompts), in obj_id order
-N_POINTS = [250, 450]                # points sampled per object, same order as PROMPTS
 MAX_POSE_DT_NS = 50_000_000  # frames whose nearest valid VIO sample is further away get no pose
 STEREO_SIZE = 768             # rectified SLAM image side (px), at native focal length: ~115 deg FOV
 DEPTH_VIS_RANGE = (0.3, 0.8)  # m, mapped red..blue (turbo) in <stem>_depth.mp4 (farther clips to blue)
-LIFT_RADIUS = 7              # px window (2r+1)^2 around a tracked point to read its depth
 
 
 @contextlib.contextmanager
@@ -94,15 +97,6 @@ def quiet_stderr():
         os.dup2(saved, 2)
         os.close(devnull)
         os.close(saved)
-
-
-def as_matrix(T):
-    """Sophus SE3 (or ndarray) -> (4,4) float64."""
-    return np.asarray(T.to_matrix() if hasattr(T, "to_matrix") else T, dtype=np.float64)
-
-
-def _unit(v):
-    return v / np.linalg.norm(v)
 
 
 # ----------------------------------------------------------------------------- frames
@@ -176,14 +170,6 @@ def read_synced(dp, rgb_ts):
     return slam_l, slam_r, T_wd, sess
 
 
-HANDS = ("left", "right")
-# Aria hand landmarks: 0-4 fingertips (thumb..pinky), 5 wrist, 6-7 thumb, 8-10 index, 11-13 middle,
-# 14-16 ring, 17-19 pinky (proximal -> distal), 20 palm centre. Chains as in projectaria_tools' rerun helpers.
-WRIST_KEYPOINTS = (5, 8, 17)  # wrist, index knuckle (MCP), pinky knuckle (MCP)
-HAND_CHAINS = [(5, 6, 7, 0), (5, 8, 9, 10, 1), (5, 11, 12, 13, 2), (5, 14, 15, 16, 3), (5, 17, 18, 19, 4),
-               (6, 8, 11, 14, 17)]
-
-
 def read_hands(dp, rgb_ts):
     """On-device hand tracking interpolated to every RGB timestamp: (T,2,21,3) landmarks in the device frame,
     hand axis 0 = left, 1 = right, NaN where a hand is not tracked."""
@@ -207,146 +193,6 @@ def read_hands(dp, rgb_ts):
     return out
 
 
-def wrist_poses(lm):
-    """(..., 21, 3) landmarks -> (..., 4, 4) wrist poses in the same frame (see T_world_wrist in the docstring;
-    same axes as imitate_common.transforms.wrist_frame). NaN where a keypoint is missing or degenerate."""
-    w, i, p = (lm[..., k, :] for k in WRIST_KEYPOINTS)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        z = (i + p) / 2 - w
-        z = z / np.linalg.norm(z, axis=-1, keepdims=True)
-        x = (p - i) - np.sum((p - i) * z, axis=-1, keepdims=True) * z
-        x = x / np.linalg.norm(x, axis=-1, keepdims=True)
-    T = np.full(lm.shape[:-2] + (4, 4), np.nan)
-    T[..., :3, 0], T[..., :3, 1], T[..., :3, 2], T[..., :3, 3] = x, np.cross(z, x), z, w
-    T[..., 3, :] = [0, 0, 0, 1]
-    bad = ~np.isfinite(T).all((-2, -1))
-    T[bad] = np.nan
-    return T
-
-
-# ----------------------------------------------------------------------------- step 1: segmentation-frame boxes
-def boxes_grounding_dino(rgb, prompts, device, box_thr):
-    from PIL import Image
-    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
-
-    model_id = "IDEA-Research/grounding-dino-base"
-    proc = AutoProcessor.from_pretrained(model_id)
-    model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device).eval()
-    img = Image.fromarray(rgb)
-    boxes = []
-    for p in prompts:
-        text = p.lower().strip().rstrip(".") + "."
-        inp = proc(images=img, text=text, return_tensors="pt").to(device)
-        with torch.no_grad():
-            out = model(**inp)
-        try:
-            res = proc.post_process_grounded_object_detection(
-                out, inp.input_ids, threshold=box_thr, target_sizes=[img.size[::-1]])[0]
-        except TypeError:  # older transformers
-            res = proc.post_process_grounded_object_detection(
-                out, inp.input_ids, box_threshold=box_thr, target_sizes=[img.size[::-1]])[0]
-        if len(res["boxes"]) == 0:
-            print(f"  Grounding DINO: nothing for '{p}' (lower --box-thr or pick another start frame with --start)")
-            continue
-        k = int(res["scores"].argmax())
-        b = res["boxes"][k].cpu().numpy().tolist()
-        print(f"  '{p}': box {[round(v) for v in b]} score {float(res['scores'][k]):.2f}")
-        boxes.append((p, b))
-    del model
-    torch.cuda.empty_cache()
-    return boxes
-
-
-# ----------------------------------------------------------------------------- step 2: segmentation-frame masks
-def masks_sam2(rgb, boxes):
-    """SAM 2 in image mode on one frame only: one (H,W) bool mask per box, same order."""
-    from ultralytics import SAM
-
-    h, w = rgb.shape[:2]
-    res = SAM("sam2.1_l.pt")(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), bboxes=[b for _, b in boxes], verbose=False)[0]
-    if res.masks is None:
-        return [np.zeros((h, w), bool) for _ in boxes]
-    masks = []
-    for m in res.masks.data.cpu().numpy():
-        if m.shape != (h, w):
-            m = cv2.resize(m.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-        masks.append(m.astype(bool))
-    for (p, _), m in zip(boxes, masks):
-        print(f"  '{p}': mask {m.sum()} px ({m.mean():.3%} of frame)")
-    return masks
-
-
-# ----------------------------------------------------------------------------- step 3: CoTracker3
-def _track_online(model, small, q_xy, device):
-    """Online CoTracker3 over small[0..], all points queried on frame 0: feeds overlapping windows of
-    2*step frames every step frames, as in CoTracker's online_demo.py. Returns tracks (T,N,2), vis (T,N)."""
-    T, step = len(small), model.step
-    frames = list(small) + [small[-1]] * max(0, 2 * step + 1 - len(small))  # pad very short segments
-    q = torch.cat([torch.zeros_like(q_xy[:, :1]), q_xy], 1)[None].to(device)  # (1,N,3), query frame 0
-
-    def run(chunk, first):
-        video = torch.from_numpy(np.stack(chunk)).permute(0, 3, 1, 2)[None].float().to(device)
-        return model(video, is_first_step=first, queries=q, add_support_grid=True)
-
-    first = True
-    for i in range(len(frames)):
-        if i % step == 0 and i != 0:
-            run(frames[max(0, i - 2 * step):i], first)
-            first = False
-    tracks, vis = run(frames[-(i % step) - step - 1:], first)
-    return tracks[0, :T].cpu().numpy(), vis[0, :T].cpu().numpy()
-
-
-def track_points(frames, masks0, n_points, device, max_side=512, tracker='online'):
-    """Sample points inside each mask (masks0 are on frames[0]) and track them all with CoTracker3 from frame 0.
-    Object k gets n_points[k] points, sampled from its mask downscaled to the tracking resolution.
-
-    tracker="online": CoTracker3 online, sliding 16-frame windows, so GPU memory does not grow with clip length.
-    tracker="offline": CoTracker3 offline, the whole clip in one call (more robust to occlusions, but memory
-    grows with clip length); its feature encoder runs 16 frames at a time (identical result, less memory).
-
-    Returns tracks (T,N,2) in frame pixel coords, vis (T,N) bool, obj_id (N,) index into masks0.
-    """
-    h, w = frames[0].shape[:2]
-    s = min(1.0, max_side / max(h, w))
-    small = [cv2.resize(f, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) for f in frames]
-    sh, sw = small[0].shape[:2]
-    rng = np.random.default_rng(0)
-    pts, obj_id = [], []
-    for k, (m, n_k) in enumerate(zip(masks0, n_points)):
-        ms = cv2.resize(m.astype(np.uint8), (sw, sh), interpolation=cv2.INTER_NEAREST) > 0
-        ys, xs = np.nonzero(ms)
-        if len(xs) == 0:
-            print(f"  object {k}: empty mask, no points")
-            continue
-        sel = rng.choice(len(xs), size=min(int(n_k), len(xs)), replace=False)
-        print(f"  object {k}: {m.sum()} mask px -> {len(sel)} points")
-        pts += [[0, xs[i], ys[i]] for i in sel]  # (query frame, x, y)
-        obj_id += [k] * len(sel)
-    if not pts:
-        raise SystemExit("all segmentation masks are empty; nothing to track")
-    q = torch.tensor(pts, dtype=torch.float32)
-    if tracker == "online":
-        model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_online").to(device)
-        with torch.no_grad():
-            tracks, vis = _track_online(model, small, q[:, 1:], device)
-    else:
-        video = torch.from_numpy(np.stack(small)).permute(0, 3, 1, 2)[None].float().to(device)
-        model = torch.hub.load("facebookresearch/co-tracker", "cotracker3_offline").to(device)
-        # its feature encoder runs on all frames at once below 200 frames, which dominates GPU memory on long
-        # clips; 16 frames at a time gives identical features
-        model.model.forward = functools.partial(model.model.forward, fmaps_chunk_size=16)
-        with torch.no_grad():
-            tracks, vis = model(video, queries=q[None].to(device))
-        tracks, vis = tracks[0].cpu().numpy(), vis[0].cpu().numpy()
-        del video
-    tracks = tracks / s  # T,N,2 in frame coords
-    vis = vis.astype(bool)  # T,N
-    del model
-    torch.cuda.empty_cache()
-    print(f"  tracked {len(obj_id)} points over {len(frames)} frames ({tracker}), mean visibility {vis.mean():.0%}")
-    return tracks, vis, np.array(obj_id, dtype=np.int32)
-
 
 # ----------------------------------------------------------------------------- step 4: stereo depth
 class RectifiedStereo:
@@ -368,7 +214,7 @@ class RectifiedStereo:
         self.baseline = float(np.linalg.norm(b))
         x = b / self.baseline
         z = T_l[:3, 2] + T_r[:3, 2]
-        z = _unit(z - (z @ x) * x)
+        z = unit(z - (z @ x) * x)
         y = np.cross(z, x)
         self.R_dev_rect = np.stack([x, y, z], axis=1)   # columns: rect axes in device coords
         self.c_left = c_l
@@ -558,7 +404,6 @@ def lift_tracks(tracks, vis, frame_hw, slam_l, slam_r, T_wd, stereo, fs, proj_rg
     """
     T, N = vis.shape
     H, W = frame_hw
-    r = LIFT_RADIUS
     pts_world = np.full((T, N, 3), np.nan)
     depth = np.full((T, N), np.nan)
     color = [np.zeros((*stereo.size[::-1], 3), np.uint8) for _ in range(T)] if depth_video else None
@@ -574,17 +419,9 @@ def lift_tracks(tracks, vis, frame_hw, slam_l, slam_r, T_wd, stereo, fs, proj_rg
         if not need_3d:
             continue
         buf = zbuffer_points(P[valid], proj_rgb, pix_scale, (H, W))
-        for n in np.nonzero(vis[t])[0]:
-            u, v = int(round(tracks[t, n, 0])), int(round(tracks[t, n, 1]))
-            if u < -r or v < -r or u >= W + r or v >= H + r:
-                continue
-            win = buf[max(v - r, 0):v + r + 1, max(u - r, 0):u + r + 1].reshape(-1, 3)
-            win = win[np.isfinite(win).all(1)]
-            if len(win) == 0:
-                continue
-            p_dev = np.median(win, axis=0)
-            depth[t, n] = proj_rgb.to_camera(p_dev[None])[0, 2]
-            pts_world[t, n] = T_wd[t, :3, :3] @ p_dev + T_wd[t, :3, 3]
+        p_dev = lift_points(buf, tracks[t], vis[t], LIFT_RADIUS)      # (N,3) device frame, NaN = no depth
+        depth[t] = proj_rgb.to_camera(p_dev)[:, 2]
+        pts_world[t] = p_dev @ T_wd[t, :3, :3].T + T_wd[t, :3, 3]
         if (t + 1) % 25 == 0 or t == T - 1:
             print(f"  depth {t + 1}/{T} frames")
     return pts_world, depth, color
@@ -616,71 +453,6 @@ def depth_to_color(stereo, disp, valid):
 
 
 # ----------------------------------------------------------------------------- output
-OVERLAY_COLORS = [(0, 220, 0), (255, 140, 0), (255, 0, 255), (0, 200, 255), (255, 255, 0)]  # BGR, per object
-HIDDEN_COLOR = (0, 0, 255)
-
-
-HAND_COLORS = [(255, 255, 255), (0, 255, 255)]  # BGR: left white, right yellow
-
-
-def draw_overlay(img_bgr, uv, vis_t, has3d_t, obj_id, names, t_sec, hand_uv_t=None):
-    """Tracked points on one (already downscaled, BGR) frame. Per object colour; filled dot = visible with
-    3D position, hollow = visible but no depth, small red dot = hidden (CoTracker's guess).
-    hand_uv_t (2,21,2): hand keypoints (left white, right yellow) drawn as a skeleton."""
-    out = img_bgr.copy()
-    if hand_uv_t is not None:
-        for h in range(2):
-            pts = hand_uv_t[h]
-            if not np.isfinite(pts).any():
-                continue
-            for chain in HAND_CHAINS:
-                for a, b in zip(chain[:-1], chain[1:]):
-                    if np.isfinite(pts[[a, b]]).all():
-                        cv2.line(out, tuple(int(x) for x in pts[a]), tuple(int(x) for x in pts[b]),
-                                 HAND_COLORS[h], 1, cv2.LINE_AA)
-            for q in pts:
-                if np.isfinite(q).all():
-                    cv2.circle(out, (int(q[0]), int(q[1])), 2, HAND_COLORS[h], -1)
-    for (u, v), vv, h3, o in zip(uv, vis_t, has3d_t, obj_id):
-        if not np.isfinite(u) or not np.isfinite(v):
-            continue
-        c = (int(u), int(v))
-        if not vv:
-            cv2.circle(out, c, 1, HIDDEN_COLOR, -1)
-        elif h3:
-            cv2.circle(out, c, 3, OVERLAY_COLORS[o % len(OVERLAY_COLORS)], -1)
-        else:
-            cv2.circle(out, c, 3, OVERLAY_COLORS[o % len(OVERLAY_COLORS)], 1)
-    parts = [f"t={t_sec:.1f}s"]
-    for k, name in enumerate(names):
-        sel = obj_id == k
-        if sel.any():
-            parts.append(f"{name} {has3d_t[sel].mean():.0%} 3D")
-    text = " | ".join(parts)
-    cv2.putText(out, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(out, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-    for k, name in enumerate(names):  # legend
-        y = 40 + 18 * k
-        cv2.circle(out, (14, y - 4), 4, OVERLAY_COLORS[k % len(OVERLAY_COLORS)], -1)
-        cv2.putText(out, name, (24, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-    return out
-
-
-def draw_segmentation(rgb, boxes, masks0):
-    """Segmentation frame with the Grounding DINO boxes and SAM 2 masks drawn on (BGR, frame resolution)."""
-    out = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    for k, ((name, b), m) in enumerate(zip(boxes, masks0)):
-        c = OVERLAY_COLORS[k % len(OVERLAY_COLORS)]
-        out[m] = (0.45 * out[m] + 0.55 * np.array(c)).astype(np.uint8)
-        cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        cv2.drawContours(out, cnts, -1, c, 2)
-        x1, y1, x2, y2 = (int(round(v)) for v in b)
-        cv2.rectangle(out, (x1, y1), (x2, y2), c, 2)
-        label = f"{name} ({m.sum()} px)"
-        cv2.putText(out, label, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(out, label, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, c, 2, cv2.LINE_AA)
-    return out
-
 
 def save_outputs(out_dir, stem, args, frames, rgb_ts, T_world_device, session_idx, boxes, masks0,
                  tracks, vis, obj_id, points_world, depth, hand_lm_device, hand_uv, depth_color=None):

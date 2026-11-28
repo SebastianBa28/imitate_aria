@@ -5,6 +5,8 @@ Write post_process.py outputs into a LeRobot dataset, one episode per recording.
 Features per frame (float32, AINA-style; missing values are 0 with a *_valid flag, never NaN or filled,
 because LeRobot's statistics cannot handle NaN):
     observation.images.rgb          video (H,W,3)  the downscaled RGB video saved by post_process
+                                    (in-scene episodes, scene_process.py: observation.images.<cam>, debug.overlay_<cam>,
+                                    debug.depth_<cam> per camera instead of the three Aria videos)
     debug.overlay                   video (H,W,3)  the same frames with tracked points + hands drawn on
     debug.depth                     video (S,S,3)  FoundationStereo depth video (not policy inputs: debug.*)
     observation.state               (24,)  right-hand joints x xyz: 5 fingertips (thumb..pinky), wrist,
@@ -19,7 +21,8 @@ Point slots are fixed per object: object k always owns slots [sum(n_points[:k]),
 Slots an episode could not fill (small or missing mask) stay 0 / invalid. The layout is written to
 meta/objects.json: {"object_names": [...], "n_points": [...], "point_object_id": [N ints]}.
 meta/sources.json lists the recording (vrs stem) of every episode, so a recording is never added twice.
-All 3D data stays in the raw VIO world frame of its recording (no re-framing).
+All 3D data stays in the frame its pipeline produced: the raw VIO world frame of each Aria recording, or
+the calibrated table frame for in-scene episodes (keep the two kinds in separate datasets).
 """
 import glob
 import json
@@ -57,11 +60,19 @@ def find_npz(folder):
     return hits[0]
 
 
+def video_names(d):
+    """{feature: video file name} of an episode: scene_process.py lists its own (one set per camera) in the
+    npz field `videos` (JSON); post_process.py episodes use VIDEOS."""
+    if "videos" in d:
+        return json.loads(str(d["videos"]))
+    return {feat: (str(d[field]) if field in d else "") for feat, field in VIDEOS.items()}
+
+
 def episode_videos(npz_path, d):
     """{feature: video path}; raises EpisodeError if one is missing."""
     vids, missing = {}, []
-    for feat, field in VIDEOS.items():
-        name = str(d[field]) if field in d else ""
+    for feat, name in video_names(d).items():
+        field = VIDEOS.get(feat, feat)
         path = os.path.join(os.path.dirname(npz_path), name)
         if name and os.path.isfile(path):
             vids[feat] = path
@@ -212,8 +223,9 @@ class EpisodeWriter:
             lay = layout_from_episode(d)
             sizes = {feat: video_hw(path) for feat, path in vids.items()}
             features = make_features(sizes, sum(lay["n_points"]))
+            robot_type = "scene_rgbd_human" if str(d.get("source", "")) == "scene" else "aria_gen2_human"
             self.ds = LeRobotDataset.create(repo_id=self.repo_id, fps=episode_fps(d), features=features,
-                                            root=self.root, robot_type="aria_gen2_human", use_videos=True)
+                                            root=self.root, robot_type=robot_type, use_videos=True)
             self.objects = {"object_names": lay["names"], "n_points": lay["n_points"],
                             "point_object_id": point_object_id(lay["n_points"]).tolist()}
             self._write_json("objects.json", self.objects)
@@ -230,6 +242,10 @@ class EpisodeWriter:
         if self.ds.fps != episode_fps(d):
             raise EpisodeError(f"{npz_path}: {episode_fps(d)} fps, the dataset has {self.ds.fps} "
                                "(post_process --stride must be the same for all recordings)")
+        ds_videos = {k for k, v in self.ds.features.items() if v["dtype"] == "video"}
+        if set(vids) != ds_videos:
+            raise EpisodeError(f"{npz_path}: videos {sorted(vids)}, the dataset has {sorted(ds_videos)} (Aria and "
+                               "in-scene episodes, or different camera sets, go into separate datasets)")
         for feat, path in vids.items():
             want = tuple(self.ds.features[feat]["shape"][:2])
             if video_hw(path) != want:
